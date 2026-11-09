@@ -18,6 +18,9 @@
 
 #[cfg(test)]
 mod fixture;
+mod stack;
+#[cfg(test)]
+mod stack_tests;
 mod style;
 #[cfg(test)]
 mod style_tests;

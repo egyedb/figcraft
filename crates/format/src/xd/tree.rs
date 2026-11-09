@@ -70,6 +70,8 @@ pub(crate) struct Cx<'a> {
     reserved: HashSet<String>,
     /// Components whose main is made from the definition, in the order instances asked for them.
     needed: Vec<String>,
+    /// Stacks and padded groups met, and those laid out with auto layout.
+    stacks: (usize, usize),
 }
 
 impl Cx<'_> {
@@ -135,6 +137,7 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         mains: HashMap::new(),
         reserved: HashSet::new(),
         needed: Vec::new(),
+        stacks: (0, 0),
     };
     index_symbols(&mut cx, &archive.resources);
     find_mains(&mut cx, archive);
@@ -154,6 +157,13 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
     }
     let mut canvases = vec![json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots})];
     let made = made_mains(&mut cx);
+    let (stacks, laid_out) = cx.stacks;
+    if laid_out < stacks {
+        cx.warn(format!(
+            "{} of {stacks} stacks and padded groups kept their layers at fixed places (their spacing or alignment varies, or they are masked); the rest became auto layout",
+            stacks - laid_out
+        ));
+    }
     if !made.is_empty() {
         cx.warn("components whose main component isn't on the canvas (linked from libraries) got one on the page Components");
         canvases.push(json!({"type": "CANVAS", "id": "0:2", "name": "Components", "children": made}));
@@ -494,9 +504,6 @@ fn unsupported(cx: &mut Cx, l: &Value) {
     if has("states") || has("stateId") {
         cx.warn("component states are not supported yet: only the state shown was imported");
     }
-    if has("contentStackType") || has("contentPadding") || has("hasContentBackground") {
-        cx.warn("stacks and padding are not supported yet: their layers were imported at fixed places");
-    }
     if has("scrollingType") || ux.get("fixed").and_then(Value::as_bool) == Some(true) {
         cx.warn("scroll groups and fixed-position layers are not supported yet: they were imported as plain layers");
     }
@@ -573,13 +580,46 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
             built.push(as_mask(m));
         }
     }
-    built.extend(children(cx, kids(l), world, world, depth + 1, false));
+    let masked = !built.is_empty();
+    // The layers with their place in the group (a stack's background is its first).
+    let mut own: Vec<(usize, Built)> =
+        kids(l).iter().enumerate().filter_map(|(i, k)| layer(cx, k, world, world, depth + 1, false).map(|b| (i, b))).collect();
+    // A stack or padded group: auto layout when that keeps every layer where XD put it.
+    let mut auto = None;
+    if let Some(mut ask) = super::stack::ask(l) {
+        cx.stacks.0 += 1;
+        // A reference's gap is its definition's.
+        ask.gaps = kids(l)
+            .iter()
+            .map(|k| {
+                let k = if str_field(k, "type") == Some("syncRef") {
+                    str_field(k, "syncSourceGuid").and_then(|g| cx.symbols.get(g).copied()).unwrap_or(k)
+                } else {
+                    k
+                };
+                k.get("meta")
+                    .and_then(|m| m.get("ux"))
+                    .and_then(|u| u.get("contentStackMarginAfter"))
+                    .and_then(Value::as_f64)
+                    .filter(|v| v.is_finite())
+            })
+            .collect();
+        if !masked {
+            auto = super::stack::layout(&ask, &mut own);
+        }
+        if auto.is_some() {
+            cx.stacks.1 += 1;
+        }
+    }
+    built.extend(own.into_iter().map(|(_, b)| b));
     let Some(b) = union(built.iter().map(|b| b.bbox)) else {
         // An empty group shows nothing.
         return None;
     };
     let built = shift(built, b.x0, b.y0);
     let mut node = JsonMap::new();
+    // Auto layout needs a frame.
+    let ty = if auto.is_some() && ty == "GROUP" { "FRAME" } else { ty };
     let bbox = place(cx, l, ty, world * Affine::translate((b.x0, b.y0)), b.width(), b.height(), origin, root, &mut node);
     style::apply(cx, l.get("style"), b.width(), b.height(), false, &mut node);
     node.remove("fills");
@@ -595,7 +635,14 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
             node.insert("fills".into(), json!([]));
             node.insert("clipsContent".into(), json!(false));
         }
+        ("FRAME", _) => {
+            node.insert("fills".into(), json!([]));
+            node.insert("clipsContent".into(), json!(false));
+        }
         _ => {}
+    }
+    if let Some(a) = auto {
+        node.extend(a);
     }
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
     Some(Built { node, bbox })

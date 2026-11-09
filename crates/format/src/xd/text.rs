@@ -22,7 +22,7 @@ const MAX_CHARS: usize = 1 << 20;
 /// Most styled runs read from one text layer.
 const MAX_RUNS: usize = 10_000;
 /// Ascent and descent (shares of the size) assumed when the font's own aren't known.
-const FALLBACK_METRICS: (f64, f64) = (0.93, 0.24);
+pub(crate) const FALLBACK_METRICS: (f64, f64) = (0.93, 0.24);
 /// Average advance (share of the size) assumed to guess the width of left-aligned point text,
 /// which the engine measures again.
 const AVERAGE_ADVANCE: f64 = 0.55;

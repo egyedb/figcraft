@@ -219,7 +219,12 @@ fn fit_point_texts(doc: &mut Document) {
             _ => 0.0,
         });
         figcraft_layout::set_size(doc, id, w, h);
-        if shift.is_finite()
+        // An auto layout places its texts itself (XD's stacks): it flows again around the new width.
+        let laid_out =
+            doc.node(id).is_some_and(|n| !n.child_layout.absolute && n.parent.and_then(|p| doc.node(p)).is_some_and(|p| p.layout.is_some()));
+        if laid_out {
+            figcraft_layout::layout_up(doc, id, &crate::measure::TextMeasure);
+        } else if shift.is_finite()
             && shift != 0.0
             && let Some(n) = doc.node_mut(id)
         {

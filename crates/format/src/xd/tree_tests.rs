@@ -226,7 +226,7 @@ fn unsupported_features_import_statically_with_notes() {
     for name in ["Cell1", "Cell2", "S1", "S2"] {
         node(&doc, name);
     }
-    for note in ["repeat grids", "stacks and padding", "component states"] {
+    for note in ["repeat grids", "component states"] {
         assert!(warnings.iter().any(|w| w.contains(note)), "{note}: {warnings:?}");
     }
 }
