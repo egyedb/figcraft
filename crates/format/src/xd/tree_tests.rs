@@ -232,15 +232,6 @@ fn unsupported_features_import_statically_with_notes() {
 }
 
 #[test]
-fn prototype_interactions_are_noted() {
-    let mut r = rect("Linked", 0.0, 0.0, 5.0, 5.0);
-    r["meta"] = json!({"ux": {"interactions": [{"triggerEvent": "click"}]}});
-    let z = xd_zip(&[board("A", (0.0, 0.0, 10.0, 10.0), vec![r])], vec![], vec![], &[]);
-    let (_, warnings) = import(&z, "f").unwrap();
-    assert!(warnings.iter().any(|w| w.contains("prototype interactions")), "{warnings:?}");
-}
-
-#[test]
 fn a_reference_with_children_of_its_own_keeps_them() {
     // The definition: a group holding a red picture. The instance's reference lists its own
     // child, a blue one (an override), which is what XD shows.

@@ -74,6 +74,14 @@ pub(crate) struct Cx<'a> {
     stacks: (usize, usize),
     /// The styles made from the document's assets, which layers link to.
     pub styles: super::assets::Styles,
+    /// Prototype interactions by the id of the layer they start on.
+    pub protos: HashMap<&'a str, &'a Value>,
+    /// The canvas place of the artboard being mapped.
+    pub artboard_at: Option<(f64, f64)>,
+    /// How overlays sit, by the artboard they show (`TOP_LEFT` or `MANUAL`).
+    pub overlays: HashMap<String, &'static str>,
+    /// Where prototypes start: artboard ids and flow names.
+    flows: Vec<(String, String)>,
 }
 
 impl Cx<'_> {
@@ -141,7 +149,14 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         needed: Vec::new(),
         stacks: (0, 0),
         styles: super::assets::Styles::default(),
+        protos: HashMap::new(),
+        artboard_at: None,
+        overlays: HashMap::new(),
+        flows: Vec::new(),
     };
+    for (id, list) in archive.protos.as_object().into_iter().flatten() {
+        cx.protos.insert(id.as_str(), list);
+    }
     index_symbols(&mut cx, &archive.resources);
     find_mains(&mut cx, archive);
     let (defs, styles) = super::assets::definitions(&mut cx, &archive.resources);
@@ -157,10 +172,28 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
             roots.push(Value::Object(b.node));
         }
     }
-    if archive.interactions {
-        cx.warn("prototype interactions are not supported yet and were skipped");
+    // Artboards shown as overlays say how they sit.
+    for r in &mut roots {
+        if let Some(pos) = r.get("id").and_then(Value::as_str).and_then(|id| cx.overlays.get(id).copied()) {
+            r["overlayPositionType"] = json!(pos);
+        }
     }
-    let mut canvases = vec![json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots})];
+    let mut starts: Vec<Value> = Vec::new();
+    if let Some(home) = &archive.home
+        && let Some(ab) = archive.artboards.iter().find(|a| &a.id == home)
+    {
+        starts.push(json!({"nodeId": home, "name": ab.name}));
+    }
+    for (id, name) in std::mem::take(&mut cx.flows) {
+        if archive.home.as_deref() != Some(id.as_str()) {
+            starts.push(json!({"nodeId": id, "name": name}));
+        }
+    }
+    let mut page = json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots});
+    if !starts.is_empty() {
+        page["flowStartingPoints"] = Value::Array(starts);
+    }
+    let mut canvases = vec![page];
     let made = made_mains(&mut cx);
     let (stacks, laid_out) = cx.stacks;
     if laid_out < stacks {
@@ -336,7 +369,12 @@ fn artboard(cx: &mut Cx, ab: &super::Artboard) -> Option<JsonMap<String, Value>>
     }
     let origin = Affine::translate((ab.x, ab.y));
     // The layers sit on the canvas: their parent transform is none.
+    cx.artboard_at = Some((ab.x, ab.y));
     let built = children(cx, kids(root), Affine::IDENTITY, origin, 1, false);
+    cx.artboard_at = None;
+    if let Some(flow) = root.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("flowName")).and_then(Value::as_str) {
+        cx.flows.push((ab.id.clone(), flow.chars().take(200).collect()));
+    }
     let (w, h, origin, built) = if ab.width > 0.0 && ab.height > 0.0 {
         (ab.width.min(MAX_SIZE), ab.height.min(MAX_SIZE), origin, built)
     } else {
@@ -362,6 +400,10 @@ fn artboard(cx: &mut Cx, ab: &super::Artboard) -> Option<JsonMap<String, Value>>
     node.insert("fills".into(), Value::Array(fills));
     unsupported(cx, root);
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
+    let ints = super::proto::interactions(cx, &ab.id, Some((ab.x, ab.y)));
+    if !ints.is_empty() {
+        node.insert("interactions".into(), Value::Array(ints));
+    }
     Some(node)
 }
 
@@ -439,7 +481,23 @@ fn layer(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: usize
     if l.get("visible").and_then(Value::as_bool) == Some(false) {
         built.node.insert("visible".into(), json!(false));
     }
+    if let Some(id) = str_field(l, "id") {
+        link_protos(cx, id, &mut built);
+    }
     Some(built)
+}
+
+/// The prototype interactions that start on layer `id`, onto its node.
+fn link_protos(cx: &mut Cx, id: &str, built: &mut Built) {
+    if !cx.protos.contains_key(id) {
+        return;
+    }
+    let bb = built.node.get("absoluteBoundingBox");
+    let at = bb.and_then(|b| Some((b.get("x")?.as_f64()?, b.get("y")?.as_f64()?)));
+    let ints = super::proto::interactions(cx, id, at);
+    if !ints.is_empty() {
+        built.node.insert("interactions".into(), Value::Array(ints));
+    }
 }
 
 /// A `syncRef` layer: a plain copy of the component layer it stands for. It takes the reference's
@@ -480,6 +538,7 @@ fn sync_ref(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: us
     if let Some(guid) = str_field(l, "guid") {
         let id = cx.id(Some(guid));
         built.node.insert("id".into(), json!(id));
+        link_protos(cx, guid, &mut built);
     }
     Some(built)
 }
@@ -511,9 +570,6 @@ fn unsupported(cx: &mut Cx, l: &Value) {
     }
     if has("scrollingType") || ux.get("fixed").and_then(Value::as_bool) == Some(true) {
         cx.warn("scroll groups and fixed-position layers are not supported yet: they were imported as plain layers");
-    }
-    if has("interactions") {
-        cx.warn("prototype interactions are not supported yet and were skipped");
     }
     if has("linkedElementRef") {
         cx.warn("linked library assets were imported as plain copies");

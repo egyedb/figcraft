@@ -131,3 +131,20 @@ pub(crate) fn point_text(id: &str, x: f64, y: f64, s: &str) -> Value {
             "textAttributes": {"lineHeight": 24}},
         "text": {"frame": {"type": "positioned"}, "paragraphs": [{"lines": [[{"x": 0, "y": 0, "from": 0, "to": s.len()}]]}], "rawText": s}})
 }
+
+/// `z` with member `name` holding `bytes` (in place of any it had).
+pub(crate) fn with_member(z: &[u8], name: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut a = zip::ZipArchive::new(std::io::Cursor::new(z)).unwrap();
+    let mut members = Vec::new();
+    for i in 0..a.len() {
+        let mut f = a.by_index(i).unwrap();
+        if f.name() == name {
+            continue;
+        }
+        let mut b = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut b).unwrap();
+        members.push((f.name().to_string(), b));
+    }
+    members.push((name.to_string(), bytes.to_vec()));
+    zip_of(&members)
+}

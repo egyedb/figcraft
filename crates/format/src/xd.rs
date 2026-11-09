@@ -11,8 +11,8 @@
 //! REST API file JSON shape and the REST importer builds the document, so this import shares its
 //! mapping, budgets and import report with the `.fig`, `.sketch` and file JSON imports.
 //!
-//! The first version covers artboards, groups, shapes, paths, text, images, transforms and masks.
-//! Components, repeat grids, states, stacks and prototype links come in as the static layers the
+//! Artboards, groups, shapes, paths, text, images, transforms, masks, components, stacks, document
+//! styles and prototype links are mapped. Repeat grids and states come in as the static layers the
 //! file shows, with a warning naming each. Anything not understood is skipped with a warning;
 //! malformed input never panics.
 
@@ -21,6 +21,9 @@ mod assets;
 mod assets_tests;
 #[cfg(test)]
 mod fixture;
+mod proto;
+#[cfg(test)]
+mod proto_tests;
 mod stack;
 #[cfg(test)]
 mod stack_tests;
@@ -148,8 +151,10 @@ pub(crate) struct Archive<'b> {
     pub pasteboard: Option<Value>,
     /// `resources/graphics/graphicContent.agc`: artboard places, component definitions.
     pub resources: Value,
-    /// Whether the file has prototype interactions.
-    pub interactions: bool,
+    /// The prototype interactions by layer id (`interactions/interactions.json`).
+    pub protos: Value,
+    /// The artboard a prototype starts on (`homeArtboard`).
+    pub home: Option<String>,
     /// Problems met while reading (artboards skipped).
     pub warnings: Vec<String>,
     zip: zip::ZipArchive<std::io::Cursor<&'b [u8]>>,
@@ -203,11 +208,10 @@ impl<'b> Archive<'b> {
         let pasteboard = json_member(&mut z, "artwork/pasteboard/graphics/graphicContent.agc", &mut total)
             .ok()
             .filter(|p| p.get("children").and_then(Value::as_array).is_some_and(|c| !c.is_empty()));
-        let interactions = json_member(&mut z, "interactions/interactions.json", &mut total)
-            .ok()
-            .and_then(|i| i.get("interactions").cloned())
-            .is_some_and(|i| i.as_object().is_some_and(|o| !o.is_empty()) || i.as_array().is_some_and(|a| !a.is_empty()));
-        Ok(Archive { artboards, pasteboard, resources, interactions, warnings, zip: z, image_total: std::cell::Cell::new(0) })
+        let interactions = json_member(&mut z, "interactions/interactions.json", &mut total).unwrap_or(Value::Null);
+        let protos = interactions.get("interactions").filter(|i| i.is_object()).cloned().unwrap_or(Value::Null);
+        let home = interactions.get("homeArtboard").and_then(Value::as_str).filter(|h| valid_id(h)).map(str::to_string);
+        Ok(Archive { artboards, pasteboard, resources, protos, home, warnings, zip: z, image_total: std::cell::Cell::new(0) })
     }
 
     /// The bytes of image `uid` (`resources/<uid>`).
