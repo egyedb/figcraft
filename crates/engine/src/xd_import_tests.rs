@@ -12,7 +12,12 @@ use crate::Session;
 
 /// A minimal `.xd` zip: one artboard `A` at 0, 0 of 400 × 300 holding `layers`.
 fn xd(layers: &[Value]) -> Vec<u8> {
-    let resources = json!({"version": "1.5.0", "children": [], "resources": {"meta": {"ux": {"symbols": []}}},
+    xd_with(layers, &[])
+}
+
+/// [`xd`] with component definitions `symbols`.
+fn xd_with(layers: &[Value], symbols: &[Value]) -> Vec<u8> {
+    let resources = json!({"version": "1.5.0", "children": [], "resources": {"meta": {"ux": {"symbols": symbols}}},
         "artboards": {"A": {"name": "Home", "x": 0, "y": 0, "width": 400, "height": 300}}});
     let manifest = json!({"children": [{"path": "artwork", "children": [{"path": "artboard-A", "name": "Home"}]}]});
     let board = json!({"version": "1.5.0", "children": [{"type": "artboard", "id": "A", "artboard": {"children": layers}}]});
@@ -76,4 +81,42 @@ fn damaged_xd_files_fail_cleanly() {
     let mut s = Session::new();
     // Not recognised as XD any more: another reader refuses it, without a panic.
     assert!(s.execute("file.open", &json!({"data": data, "name": "x.xd"})).is_err());
+}
+
+/// A rectangle layer named `name` with id `id`, filled `rgb`.
+fn face(id: &str, rgb: [u8; 3]) -> Value {
+    json!({"type": "shape", "id": id, "name": "Face", "style": {"fill": {"type": "solid", "color": {"mode": "RGB", "value": {"r": rgb[0], "g": rgb[1], "b": rgb[2]}}}},
+        "shape": {"type": "rect", "x": 0, "y": 0, "width": 80, "height": 30}})
+}
+
+#[test]
+fn xd_instances_link_to_their_main_with_overrides() {
+    let def =
+        json!({"type": "group", "id": "DEF", "name": "Button", "meta": {"ux": {"symbolId": "S"}}, "group": {"children": [face("SRC", [0, 200, 0])]}});
+    let group = |id: &str, x: f64, master: bool, child: Value| {
+        json!({"type": "group", "id": id, "name": id, "transform": {"a": 1, "b": 0, "c": 0, "d": 1, "tx": x, "ty": 10},
+            "meta": {"ux": {"symbolId": "S", "isMaster": master}}, "group": {"children": [child]}})
+    };
+    let reference = |guid: &str| json!({"type": "syncRef", "syncSourceGuid": "SRC", "guid": guid});
+    let layers = [
+        group("Main", 0.0, true, reference("g0")),
+        group("Same", 100.0, false, reference("g1")),
+        // XD writes an overridden layer out in full, under the id the instance's syncMap gives it.
+        group("Red", 200.0, false, face("g2", [255, 0, 0])),
+    ];
+    let data = base64::engine::general_purpose::STANDARD.encode(xd_with(&layers, &[def]));
+    let mut s = Session::new();
+    s.execute("file.open", &json!({"data": data, "name": "c.xd"})).unwrap();
+    let doc = s.doc().unwrap();
+    let by_name = |n: &str| doc.nodes().find(|x| x.name == n).unwrap();
+    let main = by_name("Main");
+    assert!(matches!(main.kind, NodeKind::Component { .. }));
+    let main_face = main.children[0];
+    for (name, overridden) in [("Same", false), ("Red", true)] {
+        let inst = by_name(name);
+        assert!(matches!(inst.kind, NodeKind::Instance { component, .. } if component == main.id), "{name}");
+        let f = doc.node(inst.children[0]).unwrap();
+        assert_eq!(f.source, Some(main_face), "{name}");
+        assert_eq!(f.overrides.contains("fills"), overridden, "{name}: {:?}", f.overrides);
+    }
 }

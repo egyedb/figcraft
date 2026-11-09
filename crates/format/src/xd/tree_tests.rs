@@ -127,24 +127,71 @@ fn hidden_layers_stay_hidden() {
     assert!(!node(&doc, "Off").visible);
 }
 
-#[test]
-fn component_references_are_copied_in_as_plain_layers() {
-    let def = json!({"type": "group", "id": "MAIN", "name": "Button", "meta": {"ux": {"symbolId": "S1"}}, "group": {"children": [
-        {"type": "shape", "id": "SRC", "name": "Face", "transform": translate(0.0, 0.0), "style": {"fill": rgb(0, 200, 0)},
+/// A component definition `S1`: a group holding one green rectangle, `Face` (id `SRC`).
+fn button_def() -> serde_json::Value {
+    json!({"type": "group", "id": "DEF", "name": "Button", "meta": {"ux": {"symbolId": "S1"}}, "group": {"children": [
+        {"type": "shape", "id": "SRC", "name": "Face", "style": {"fill": rgb(0, 200, 0)},
             "shape": {"type": "rect", "x": 0, "y": 0, "width": 80, "height": 30}}
-    ]}});
-    let inst = |id: &str, x: f64, guid: &str| {
-        json!({"type": "group", "id": id, "name": id, "transform": translate(x, 10.0),
-            "meta": {"ux": {"symbolId": "S1", "syncMap": {"SRC": guid}}},
-            "group": {"children": [{"type": "syncRef", "syncSourceGuid": "SRC", "guid": guid}]}})
-    };
-    let z = xd_zip(&[board("A", (0.0, 0.0, 500.0, 500.0), vec![inst("I1", 0.0, "g1"), inst("I2", 100.0, "g2")])], vec![], vec![def], &[]);
+    ]}})
+}
+
+/// A group of component `S1` at `x`, 10: its main when `master`, else an instance.
+fn button(id: &str, x: f64, guid: &str, master: bool) -> serde_json::Value {
+    json!({"type": "group", "id": id, "name": id, "transform": translate(x, 10.0),
+        "meta": {"ux": {"symbolId": "S1", "isMaster": master, "syncMap": {"SRC": guid}}},
+        "group": {"children": [{"type": "syncRef", "syncSourceGuid": "SRC", "guid": guid}]}})
+}
+
+fn page_of(doc: &Document, id: figcraft_doc::NodeId) -> &str {
+    doc.page_of(id).and_then(|p| doc.node(p)).map_or("", |p| p.name.as_str())
+}
+
+#[test]
+fn mains_become_components_and_instances_name_them() {
+    let layers = vec![button("Main", 300.0, "g0", true), button("I1", 0.0, "g1", false), button("I2", 100.0, "g2", false)];
+    let z = xd_zip(&[board("A", (0.0, 0.0, 500.0, 500.0), layers)], vec![], vec![button_def()], &[]);
     let (doc, warnings) = import(&z, "f").unwrap();
-    let faces: Vec<_> = doc.nodes().filter(|n| n.name == "Face").collect();
-    assert_eq!(faces.len(), 2);
-    let xs: Vec<f64> = faces.iter().map(|f| (doc.world_transform(f.id) * Point::ZERO).x).collect();
-    assert!(xs.contains(&0.0) && xs.contains(&100.0), "{xs:?}");
-    assert!(warnings.iter().any(|w| w.contains("components are not supported yet")), "{warnings:?}");
+    let main = node(&doc, "Main");
+    assert!(matches!(main.kind, NodeKind::Component { .. }), "{:?} {warnings:?}", main.kind);
+    for name in ["I1", "I2"] {
+        let NodeKind::Instance { component, .. } = node(&doc, name).kind else { panic!("{name} is {:?}", node(&doc, name).kind) };
+        assert_eq!(component, main.id);
+    }
+    // Each holds the layers XD shows, where XD shows them.
+    let xs: Vec<f64> = doc.nodes().filter(|n| n.name == "Face").map(|f| (doc.world_transform(f.id) * Point::ZERO).x).collect();
+    assert_eq!(xs.len(), 3);
+    for x in [0.0, 100.0, 300.0] {
+        assert!(xs.contains(&x), "{xs:?}");
+    }
+    // No page of made mains: the main is on the canvas.
+    assert_eq!(doc.pages.len(), 1);
+    assert!(!warnings.iter().any(|w| w.contains("plain groups")), "{warnings:?}");
+}
+
+#[test]
+fn instances_of_library_components_get_a_main_on_their_own_page() {
+    let layers = vec![button("I1", 0.0, "g1", false), button("I2", 100.0, "g2", false)];
+    let z = xd_zip(&[board("A", (0.0, 0.0, 500.0, 500.0), layers)], vec![], vec![button_def()], &[]);
+    let (doc, warnings) = import(&z, "f").unwrap();
+    let mains: Vec<_> = doc.nodes().filter(|n| matches!(n.kind, NodeKind::Component { .. })).collect();
+    assert_eq!(mains.len(), 1, "{warnings:?}");
+    assert_eq!(page_of(&doc, mains[0].id), "Components");
+    assert_eq!(mains[0].name, "Button");
+    for name in ["I1", "I2"] {
+        let NodeKind::Instance { component, .. } = node(&doc, name).kind else { panic!("{name}") };
+        assert_eq!(component, mains[0].id);
+        assert_eq!(page_of(&doc, node(&doc, name).id), "Page 1");
+    }
+    assert!(warnings.iter().any(|w| w.contains("page Components")), "{warnings:?}");
+}
+
+#[test]
+fn instances_without_a_definition_stay_groups() {
+    let mut lone = group("Lone", None, vec![rect("R", 0.0, 0.0, 5.0, 5.0)]);
+    lone["meta"] = json!({"ux": {"symbolId": "NOWHERE"}});
+    let (doc, warnings) = one_board(vec![lone]);
+    assert!(matches!(node(&doc, "Lone").kind, NodeKind::Group));
+    assert!(warnings.iter().any(|w| w.contains("definition is missing")), "{warnings:?}");
 }
 
 #[test]

@@ -5,7 +5,13 @@
 //! own place comes from the resources' `artboards` table. Groups have no size of their own; a
 //! group here is sized to what it holds. A group's `meta.ux.clipPathResources` is its mask, a
 //! shape in the group's own space. A `syncRef` layer stands for the component layer its
-//! `syncSourceGuid` names in the resources' `symbols`; it is copied in as a plain layer.
+//! `syncSourceGuid` names in the resources' `symbols`; it is copied in.
+//!
+//! Components: a group with `meta.ux.symbolId` is a component's main when `isMaster` says so,
+//! else an instance of it. The main becomes a COMPONENT, each instance an INSTANCE naming it and
+//! holding the layers XD shows for it (its overrides included); the engine links them by
+//! structure and keeps what differs as overrides. A component whose main isn't on the canvas
+//! (linked from a library) gets one made from its definition, on a page of its own.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -56,6 +62,14 @@ pub(crate) struct Cx<'a> {
     /// What `fonts` said so far, by PostScript name and by family and style.
     pub face_cache: HashMap<String, Option<(String, String)>>,
     pub metrics_cache: HashMap<(String, String), Option<(f64, f64)>>,
+    /// Component definitions by `symbolId`.
+    defs: HashMap<&'a str, &'a Value>,
+    /// The node id of each component's main, by `symbolId`.
+    mains: HashMap<String, String>,
+    /// Ids kept for mains (no other layer takes them).
+    reserved: HashSet<String>,
+    /// Components whose main is made from the definition, in the order instances asked for them.
+    needed: Vec<String>,
 }
 
 impl Cx<'_> {
@@ -83,7 +97,7 @@ impl Cx<'_> {
 
     /// A node id: the layer's own when it has one not given yet, else a new one.
     fn id(&mut self, own: Option<&str>) -> String {
-        if let Some(id) = own.filter(|i| !i.is_empty() && i.len() <= 128)
+        if let Some(id) = own.filter(|i| !i.is_empty() && i.len() <= 128 && !self.reserved.contains(*i))
             && self.ids.insert(id.to_string())
         {
             return id.to_string();
@@ -117,8 +131,13 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         fonts,
         face_cache: HashMap::new(),
         metrics_cache: HashMap::new(),
+        defs: HashMap::new(),
+        mains: HashMap::new(),
+        reserved: HashSet::new(),
+        needed: Vec::new(),
     };
     index_symbols(&mut cx, &archive.resources);
+    find_mains(&mut cx, archive);
     let mut roots = Vec::new();
     for ab in &archive.artboards {
         if let Some(b) = artboard(&mut cx, ab) {
@@ -133,8 +152,13 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
     if archive.interactions {
         cx.warn("prototype interactions are not supported yet and were skipped");
     }
-    let canvas = json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots});
-    let json = json!({"name": name, "document": {"type": "DOCUMENT", "id": "0:0", "children": [canvas]}});
+    let mut canvases = vec![json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots})];
+    let made = made_mains(&mut cx);
+    if !made.is_empty() {
+        cx.warn("components whose main component isn't on the canvas (linked from libraries) got one on the page Components");
+        canvases.push(json!({"type": "CANVAS", "id": "0:2", "name": "Components", "children": made}));
+    }
+    let json = json!({"name": name, "document": {"type": "DOCUMENT", "id": "0:0", "children": canvases}});
     Map { json, warnings: cx.warnings, networks: cx.networks }
 }
 
@@ -158,6 +182,94 @@ fn index_symbols<'a>(cx: &mut Cx<'a>, resources: &'a Value) {
         stack.extend(ux.and_then(|u| u.get("clipPathResources")).map_or(&[][..], |c| list(c, "children")));
         states.extend(ux.and_then(|u| u.get("states")).and_then(Value::as_array).into_iter().flatten());
     }
+}
+
+/// Note the main of each component on the canvas (the first, when a file has more), and every
+/// component definition.
+fn find_mains<'a>(cx: &mut Cx<'a>, archive: &'a Archive) {
+    let symbols = archive.resources.get("resources").and_then(|r| r.get("meta")).and_then(|m| m.get("ux")).and_then(|u| u.get("symbols"));
+    for d in symbols.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(sid) = symbol_id(d) {
+            cx.defs.entry(sid).or_insert(d);
+        }
+    }
+    let mut stack: Vec<&Value> = archive.artboards.iter().flat_map(|a| list(&a.content, "children")).collect();
+    stack.extend(archive.pasteboard.iter().flat_map(|p| list(p, "children")));
+    let mut seen = 0usize;
+    while let Some(n) = stack.pop() {
+        seen += 1;
+        if seen > MAX_SYMBOL_INDEX {
+            break;
+        }
+        if let (Some(sid), Some(id), true) = (symbol_id(n), str_field(n, "id"), is_master(n))
+            && !cx.mains.contains_key(sid)
+        {
+            cx.mains.insert(sid.to_string(), id.to_string());
+            cx.reserved.insert(id.to_string());
+        }
+        stack.extend(kids(n));
+    }
+}
+
+/// A layer's `meta.ux.symbolId`: it is a component's main or instance.
+fn symbol_id(n: &Value) -> Option<&str> {
+    n.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("symbolId")).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+fn is_master(n: &Value) -> bool {
+    n.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("isMaster")).and_then(Value::as_bool) == Some(true)
+}
+
+/// What a group is: a component's main (`COMPONENT`, with the id its instances name), an
+/// instance (`INSTANCE`, with its main's id) or a plain group.
+fn group_kind(cx: &mut Cx, l: &Value) -> (&'static str, Option<String>) {
+    let Some(sid) = symbol_id(l) else { return ("GROUP", None) };
+    let main = cx.mains.get(sid).cloned();
+    if is_master(l) && main.is_some() && main.as_deref() == str_field(l, "id") {
+        return ("COMPONENT", main);
+    }
+    if let Some(m) = main {
+        return ("INSTANCE", Some(m));
+    }
+    if cx.defs.contains_key(sid) {
+        // A main made from the definition, on the Components page.
+        let id = format!("xd-main:{}", sid.chars().take(100).collect::<String>());
+        cx.reserved.insert(id.clone());
+        cx.mains.insert(sid.to_string(), id.clone());
+        cx.needed.push(sid.to_string());
+        return ("INSTANCE", Some(id));
+    }
+    cx.warn("instances of components whose definition is missing from the file were imported as plain groups");
+    ("GROUP", None)
+}
+
+/// The mains made from definitions, in a row on their own page. Making one can ask for more
+/// (components nested in it).
+fn made_mains(cx: &mut Cx) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut x = 0.0;
+    let mut i = 0;
+    while let Some(sid) = cx.needed.get(i).cloned() {
+        i += 1;
+        let (Some(def), Some(id)) = (cx.defs.get(sid.as_str()).copied(), cx.mains.get(&sid).cloned()) else { continue };
+        if !cx.count() {
+            break;
+        }
+        let world = transform(cx, def);
+        let Some(mut b) = group(cx, def, world, Affine::IDENTITY, 1, true, "COMPONENT", Some(id)) else { continue };
+        // In a row, 100 px apart, tops at 0.
+        let (dx, dy) = (x - b.bbox.x0, -b.bbox.y0);
+        x += b.bbox.width() + 100.0;
+        if let Some(rt) = b.node.get_mut("relativeTransform").and_then(Value::as_array_mut) {
+            for (row, d) in rt.iter_mut().zip([dx, dy]) {
+                if let Some(e) = row.get_mut(2) {
+                    *e = json!(e.as_f64().unwrap_or(0.0) + d);
+                }
+            }
+        }
+        out.push(Value::Object(b.node));
+    }
+    out
 }
 
 /// The children of a group or artboard layer.
@@ -288,7 +400,10 @@ fn layer(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: usize
     unsupported(cx, l);
     let world = xd_parent * transform(cx, l);
     let mut built = match ty {
-        "group" | "artboard" => group(cx, l, world, origin, depth, root)?,
+        "group" | "artboard" => {
+            let (ty, main) = group_kind(cx, l);
+            group(cx, l, world, origin, depth, root, ty, main)?
+        }
         "shape" => shape(cx, l, world, origin, root)?,
         "text" => {
             let super::text::Laid { mut node, rect, clip } = super::text::node(cx, l)?;
@@ -373,9 +488,6 @@ fn weight(l: &Value) -> usize {
 fn unsupported(cx: &mut Cx, l: &Value) {
     let Some(ux) = l.get("meta").and_then(|m| m.get("ux")) else { return };
     let has = |k: &str| ux.get(k).is_some_and(|v| !v.is_null());
-    if has("symbolId") {
-        cx.warn("components are not supported yet: instances and main components were imported as plain groups");
-    }
     if has("repeatGrid") {
         cx.warn("repeat grids are not supported yet: they were imported as plain groups of their cells");
     }
@@ -451,7 +563,9 @@ fn clipped_text(
 
 /// A group (or an artboard inside a group, which XD doesn't make): sized to its children, its
 /// mask first.
-fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, root: bool) -> Option<Built> {
+/// `ty`: `GROUP`, or `COMPONENT` / `INSTANCE` with `main` the main's id.
+#[allow(clippy::too_many_arguments)]
+fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, root: bool, ty: &str, main: Option<String>) -> Option<Built> {
     let mut built = Vec::new();
     let clip_path = l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("clipPathResources"));
     if let Some(cp) = clip_path {
@@ -466,10 +580,23 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
     };
     let built = shift(built, b.x0, b.y0);
     let mut node = JsonMap::new();
-    let bbox = place(cx, l, "GROUP", world * Affine::translate((b.x0, b.y0)), b.width(), b.height(), origin, root, &mut node);
+    let bbox = place(cx, l, ty, world * Affine::translate((b.x0, b.y0)), b.width(), b.height(), origin, root, &mut node);
     style::apply(cx, l.get("style"), b.width(), b.height(), false, &mut node);
     node.remove("fills");
     node.remove("strokes");
+    match (ty, main) {
+        ("COMPONENT", Some(id)) => {
+            node.insert("id".into(), json!(id));
+            node.insert("fills".into(), json!([]));
+            node.insert("clipsContent".into(), json!(false));
+        }
+        ("INSTANCE", Some(id)) => {
+            node.insert("componentId".into(), json!(id));
+            node.insert("fills".into(), json!([]));
+            node.insert("clipsContent".into(), json!(false));
+        }
+        _ => {}
+    }
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
     Some(Built { node, bbox })
 }
