@@ -72,6 +72,8 @@ pub(crate) struct Cx<'a> {
     needed: Vec<String>,
     /// Stacks and padded groups met, and those laid out with auto layout.
     stacks: (usize, usize),
+    /// The styles made from the document's assets, which layers link to.
+    pub styles: super::assets::Styles,
 }
 
 impl Cx<'_> {
@@ -138,9 +140,12 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         reserved: HashSet::new(),
         needed: Vec::new(),
         stacks: (0, 0),
+        styles: super::assets::Styles::default(),
     };
     index_symbols(&mut cx, &archive.resources);
     find_mains(&mut cx, archive);
+    let (defs, styles) = super::assets::definitions(&mut cx, &archive.resources);
+    cx.styles = styles;
     let mut roots = Vec::new();
     for ab in &archive.artboards {
         if let Some(b) = artboard(&mut cx, ab) {
@@ -168,7 +173,7 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         cx.warn("components whose main component isn't on the canvas (linked from libraries) got one on the page Components");
         canvases.push(json!({"type": "CANVAS", "id": "0:2", "name": "Components", "children": made}));
     }
-    let json = json!({"name": name, "document": {"type": "DOCUMENT", "id": "0:0", "children": canvases}});
+    let json = json!({"name": name, "document": {"type": "DOCUMENT", "id": "0:0", "children": canvases}, "styleDefinitions": defs});
     Map { json, warnings: cx.warnings, networks: cx.networks }
 }
 
@@ -624,6 +629,7 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
     style::apply(cx, l.get("style"), b.width(), b.height(), false, &mut node);
     node.remove("fills");
     node.remove("strokes");
+    node.remove("styles");
     match (ty, main) {
         ("COMPONENT", Some(id)) => {
             node.insert("id".into(), json!(id));
@@ -650,7 +656,7 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
 
 /// A mask shape: it clips the layers after it and isn't drawn.
 fn as_mask(mut b: Built) -> Built {
-    for k in ["strokes", "effects", "opacity", "blendMode"] {
+    for k in ["strokes", "effects", "opacity", "blendMode", "styles"] {
         b.node.remove(k);
     }
     b.node.insert("fills".into(), json!([{"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}]));

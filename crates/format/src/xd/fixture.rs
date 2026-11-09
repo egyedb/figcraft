@@ -20,6 +20,11 @@ pub(crate) fn board(id: &'static str, rect: (f64, f64, f64, f64), layers: Vec<Va
 
 /// An `.xd` zip of `boards`, loose `pasteboard` layers, component `symbols` and other `files`.
 pub(crate) fn xd_zip(boards: &[Board], pasteboard: Vec<Value>, symbols: Vec<Value>, files: &[(&str, &[u8])]) -> Vec<u8> {
+    xd_zip_full(boards, pasteboard, symbols, json!({}), files)
+}
+
+/// [`xd_zip`] with more fields in the resources' `meta.ux` (`documentLibrary`, `colorSwatches`).
+pub(crate) fn xd_zip_full(boards: &[Board], pasteboard: Vec<Value>, symbols: Vec<Value>, ux: Value, files: &[(&str, &[u8])]) -> Vec<u8> {
     let artboards: serde_json::Map<String, Value> = boards
         .iter()
         .map(|b| (b.id.to_string(), json!({"name": b.name, "x": b.rect.0, "y": b.rect.1, "width": b.rect.2, "height": b.rect.3})))
@@ -29,6 +34,10 @@ pub(crate) fn xd_zip(boards: &[Board], pasteboard: Vec<Value>, symbols: Vec<Valu
         "resources": {"meta": {"ux": {"symbols": symbols}}, "gradients": {}, "clipPaths": {}},
         "artboards": artboards,
     });
+    let mut resources = resources;
+    for (k, v) in ux.as_object().into_iter().flatten() {
+        resources["resources"]["meta"]["ux"][k] = v.clone();
+    }
     let manifest = json!({
         "id": "M",
         "children": [{"path": "artwork", "name": "artwork", "children":

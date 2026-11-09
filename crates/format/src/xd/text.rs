@@ -91,6 +91,9 @@ pub(crate) fn node(cx: &mut Cx, l: &Value) -> Option<Laid> {
         }
     }
     runs(cx, l, &characters, &base, &faces, &mut node);
+    if let Some(id) = super::assets::text_link(cx, l) {
+        super::style::link(&mut node, "text", id);
+    }
     node.insert("characters".into(), json!(characters));
     node.insert("style".into(), base);
 
@@ -200,7 +203,7 @@ fn faces(segments: &[Segment]) -> HashMap<String, (String, String)> {
 /// The family and style of a font XD names by PostScript name `ps`, `family` and `style`: the
 /// installed face of `ps`, else what XD's layout resolved `ps` to, else the names given (XD often
 /// gives the PostScript name as the family, with no style), else what `ps` reads as.
-fn resolve(cx: &mut Cx, ps: &str, family: &str, style: &str, faces: &HashMap<String, (String, String)>) -> (String, String) {
+pub(crate) fn resolve(cx: &mut Cx, ps: &str, family: &str, style: &str, faces: &HashMap<String, (String, String)>) -> (String, String) {
     if !ps.is_empty() {
         if let Some(found) = installed(cx, ps) {
             return found;

@@ -16,6 +16,9 @@
 //! file shows, with a warning naming each. Anything not understood is skipped with a warning;
 //! malformed input never panics.
 
+mod assets;
+#[cfg(test)]
+mod assets_tests;
 #[cfg(test)]
 mod fixture;
 mod stack;

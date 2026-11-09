@@ -142,9 +142,18 @@ pub(crate) fn apply(cx: &mut Cx, st: Option<&Value>, w: f64, h: f64, text: bool,
     if text && fill.is_none() {
         paints.push(json!({"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}));
     }
+    let single = paints.len() == 1;
     node.insert("fills".into(), Value::Array(paints));
+    if single && let Some(id) = super::assets::paint_link(cx, fill) {
+        link(node, "fill", id);
+    }
     let Some(st) = st else { return };
     stroke(cx, st.get("stroke"), w, h, node);
+    if node.contains_key("strokes")
+        && let Some(id) = super::assets::paint_link(cx, st.get("stroke"))
+    {
+        link(node, "stroke", id);
+    }
     let effects = effects(cx, st.get("filters"));
     if !effects.is_empty() {
         node.insert("effects".into(), Value::Array(effects));
@@ -159,6 +168,14 @@ pub(crate) fn apply(cx: &mut Cx, st: Option<&Value>, w: f64, h: f64, text: bool,
             }
             None => cx.warn(format!("the {} blend mode is not supported yet; those layers blend normally", clip(b))),
         }
+    }
+}
+
+/// Link `node`'s `slot` (`fill`, `stroke`, `text`) to style `id`.
+pub(crate) fn link(node: &mut JsonMap<String, Value>, slot: &str, id: String) {
+    let styles = node.entry("styles").or_insert_with(|| json!({}));
+    if let Some(m) = styles.as_object_mut() {
+        m.insert(slot.into(), json!(id));
     }
 }
 
