@@ -11,7 +11,11 @@
 //! else an instance of it. The main becomes a COMPONENT, each instance an INSTANCE naming it and
 //! holding the layers XD shows for it (its overrides included); the engine links them by
 //! structure and keeps what differs as overrides. A component whose main isn't on the canvas
-//! (linked from a library) gets one made from its definition, on a page of its own.
+//! (linked from a library) gets one made from its definition, on a page of its own. A component
+//! with states (`meta.ux.states` on its definition) becomes a component set on that page: its
+//! definition is the `State=Default` variant, each other state a variant beside it; its main on
+//! the canvas becomes an instance of the default one, and instances name the variant of the state
+//! they show (`meta.ux.stateId`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -82,6 +86,18 @@ pub(crate) struct Cx<'a> {
     pub overlays: HashMap<String, &'static str>,
     /// Where prototypes start: artboard ids and flow names.
     flows: Vec<(String, String)>,
+    /// The node id of each other state's variant, by state id; the default state's is its main's.
+    pub states: HashMap<String, String>,
+    /// Each state's component, by state id.
+    state_of: HashMap<String, String>,
+}
+
+impl Cx<'_> {
+    /// The component node a state id names: its variant, or for a component's own id (its default
+    /// state) its main.
+    pub(crate) fn state_node(&self, id: &str) -> Option<String> {
+        self.states.get(id).cloned().or_else(|| self.mains.get(id).cloned())
+    }
 }
 
 impl Cx<'_> {
@@ -153,6 +169,8 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         artboard_at: None,
         overlays: HashMap::new(),
         flows: Vec::new(),
+        states: HashMap::new(),
+        state_of: HashMap::new(),
     };
     for (id, list) in archive.protos.as_object().into_iter().flatten() {
         cx.protos.insert(id.as_str(), list);
@@ -203,7 +221,7 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         ));
     }
     if !made.is_empty() {
-        cx.warn("components whose main component isn't on the canvas (linked from libraries) got one on the page Components");
+        cx.warn("components linked from libraries got a main, and components with states a component set of their states, on the page Components");
         canvases.push(json!({"type": "CANVAS", "id": "0:2", "name": "Components", "children": made}));
     }
     let json = json!({"name": name, "document": {"type": "DOCUMENT", "id": "0:0", "children": canvases}, "styleDefinitions": defs});
@@ -239,6 +257,14 @@ fn find_mains<'a>(cx: &mut Cx<'a>, archive: &'a Archive) {
     for d in symbols.and_then(Value::as_array).into_iter().flatten() {
         if let Some(sid) = symbol_id(d) {
             cx.defs.entry(sid).or_insert(d);
+            for st in states(d) {
+                if let Some(id) = str_field(st, "id").filter(|i| !i.is_empty() && *i != sid && i.len() <= 128) {
+                    let node = format!("xd-state:{id}");
+                    cx.reserved.insert(node.clone());
+                    cx.states.entry(id.to_string()).or_insert(node);
+                    cx.state_of.entry(id.to_string()).or_insert_with(|| sid.to_string());
+                }
+            }
         }
     }
     let mut stack: Vec<&Value> = archive.artboards.iter().flat_map(|a| list(&a.content, "children")).collect();
@@ -249,8 +275,11 @@ fn find_mains<'a>(cx: &mut Cx<'a>, archive: &'a Archive) {
         if seen > MAX_SYMBOL_INDEX {
             break;
         }
+        // A component with states gets its set on the Components page, where its variants have
+        // room: its main on the canvas becomes an instance of the default one.
         if let (Some(sid), Some(id), true) = (symbol_id(n), str_field(n, "id"), is_master(n))
             && !cx.mains.contains_key(sid)
+            && cx.defs.get(sid).is_none_or(|d| states(d).is_empty())
         {
             cx.mains.insert(sid.to_string(), id.to_string());
             cx.reserved.insert(id.to_string());
@@ -262,6 +291,11 @@ fn find_mains<'a>(cx: &mut Cx<'a>, archive: &'a Archive) {
 /// A layer's `meta.ux.symbolId`: it is a component's main or instance.
 fn symbol_id(n: &Value) -> Option<&str> {
     n.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("symbolId")).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// A component definition's other states.
+fn states(d: &Value) -> &[Value] {
+    d.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("states")).and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
 fn is_master(n: &Value) -> bool {
@@ -276,8 +310,11 @@ fn group_kind(cx: &mut Cx, l: &Value) -> (&'static str, Option<String>) {
     if is_master(l) && main.is_some() && main.as_deref() == str_field(l, "id") {
         return ("COMPONENT", main);
     }
+    // An instance showing another state names that state's variant.
+    let shown = l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("stateId")).and_then(Value::as_str).filter(|s| *s != sid);
+    let variant = shown.filter(|s| cx.state_of.get(*s).is_some_and(|c| c == sid)).and_then(|s| cx.states.get(s).cloned());
     if let Some(m) = main {
-        return ("INSTANCE", Some(m));
+        return ("INSTANCE", Some(variant.unwrap_or(m)));
     }
     if cx.defs.contains_key(sid) {
         // A main made from the definition, on the Components page.
@@ -285,7 +322,7 @@ fn group_kind(cx: &mut Cx, l: &Value) -> (&'static str, Option<String>) {
         cx.reserved.insert(id.clone());
         cx.mains.insert(sid.to_string(), id.clone());
         cx.needed.push(sid.to_string());
-        return ("INSTANCE", Some(id));
+        return ("INSTANCE", Some(variant.unwrap_or(id)));
     }
     cx.warn("instances of components whose definition is missing from the file were imported as plain groups");
     ("GROUP", None)
@@ -304,17 +341,12 @@ fn made_mains(cx: &mut Cx) -> Vec<Value> {
             break;
         }
         let world = transform(cx, def);
-        let Some(mut b) = group(cx, def, world, Affine::IDENTITY, 1, true, "COMPONENT", Some(id)) else { continue };
+        let Some(b) = group(cx, def, world, Affine::IDENTITY, 1, true, "COMPONENT", Some(id)) else { continue };
+        let mut b = with_states(cx, def, &sid, b, world, Affine::IDENTITY, 1, true);
         // In a row, 100 px apart, tops at 0.
         let (dx, dy) = (x - b.bbox.x0, -b.bbox.y0);
         x += b.bbox.width() + 100.0;
-        if let Some(rt) = b.node.get_mut("relativeTransform").and_then(Value::as_array_mut) {
-            for (row, d) in rt.iter_mut().zip([dx, dy]) {
-                if let Some(e) = row.get_mut(2) {
-                    *e = json!(e.as_f64().unwrap_or(0.0) + d);
-                }
-            }
-        }
+        move_by(&mut b, dx, dy, Affine::IDENTITY);
         out.push(Value::Object(b.node));
     }
     out
@@ -459,7 +491,11 @@ fn layer(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: usize
     let mut built = match ty {
         "group" | "artboard" => {
             let (ty, main) = group_kind(cx, l);
-            group(cx, l, world, origin, depth, root, ty, main)?
+            let b = group(cx, l, world, origin, depth, root, ty, main)?;
+            match symbol_id(l).filter(|_| ty == "COMPONENT") {
+                Some(sid) => with_states(cx, l, sid, b, world, origin, depth, root),
+                None => b,
+            }
         }
         "shape" => shape(cx, l, world, origin, root)?,
         "text" => {
@@ -564,9 +600,6 @@ fn unsupported(cx: &mut Cx, l: &Value) {
     let has = |k: &str| ux.get(k).is_some_and(|v| !v.is_null());
     if has("repeatGrid") {
         cx.warn("repeat grids are not supported yet: they were imported as plain groups of their cells");
-    }
-    if has("states") || has("stateId") {
-        cx.warn("component states are not supported yet: only the state shown was imported");
     }
     if has("scrollingType") || ux.get("fixed").and_then(Value::as_bool) == Some(true) {
         cx.warn("scroll groups and fixed-position layers are not supported yet: they were imported as plain layers");
@@ -708,6 +741,106 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
     }
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
     Some(Built { node, bbox })
+}
+
+/// Main `main` (built from `l`, component `sid`, placed at `world`) as a component set when its
+/// definition has other states: the main as `State=Default`, each other state a variant in a row
+/// to its right, 40 px apart. Other mains as they are.
+#[allow(clippy::too_many_arguments)]
+fn with_states(cx: &mut Cx, l: &Value, sid: &str, mut main: Built, world: Affine, origin: Affine, depth: usize, root: bool) -> Built {
+    let Some(def) = cx.defs.get(sid).copied() else { return main };
+    let others = states(def);
+    if others.is_empty() {
+        return main;
+    }
+    let mut used = std::collections::HashSet::new();
+    let mut name_of = |raw: &str| {
+        // A variant's name holds `Property=Value` pairs separated by commas.
+        let spaced: String = raw.chars().map(|c| if c == ',' || c == '=' { ' ' } else { c }).collect();
+        let clean: String = spaced.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect();
+        let base = if clean.is_empty() { "State".to_string() } else { clean };
+        let mut name = base.clone();
+        let mut n = 2;
+        while !used.insert(name.to_lowercase()) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        format!("State={name}")
+    };
+    main.node.insert("name".into(), json!(name_of("Default")));
+    let mut variants = vec![main];
+    for st in others.iter().take(256) {
+        let Some(id) = str_field(st, "id").and_then(|i| cx.states.get(i).cloned()) else { continue };
+        let name = name_of(str_field(st, "name").unwrap_or("State"));
+        // A state is laid out like its component's main.
+        let Some(mut v) = group(cx, st, world, origin, depth, false, "COMPONENT", Some(id)) else { continue };
+        v.node.insert("name".into(), json!(name));
+        variants.push(v);
+    }
+    // In a row from the main's left, tops level with it.
+    let mut x = variants.first().map_or(0.0, |v| v.bbox.x1 + 40.0);
+    let top = variants.first().map_or(0.0, |v| v.bbox.y0);
+    for v in variants.iter_mut().skip(1) {
+        let (dx, dy) = (x - v.bbox.x0, top - v.bbox.y0);
+        x += v.bbox.width() + 40.0;
+        move_by(v, dx, dy, origin);
+    }
+    // Inside the set every variant says where it ends up (the main may have been a top-level layer).
+    for v in &mut variants {
+        let bb = origin.transform_rect_bbox(v.bbox);
+        v.node.insert("absoluteBoundingBox".into(), json!({"x": bb.x0, "y": bb.y0, "width": bb.width(), "height": bb.height()}));
+    }
+    let Some(b) = union(variants.iter().map(|v| v.bbox)) else { return variants.remove(0) };
+    let variants = shift(variants, b.x0, b.y0);
+    let mut set = JsonMap::new();
+    let bbox = place(cx, l, "COMPONENT_SET", origin * Affine::translate((b.x0, b.y0)), b.width(), b.height(), origin, root, &mut set);
+    set.insert("id".into(), json!(format!("xd-set:{}", sid.chars().take(100).collect::<String>())));
+    set.insert("fills".into(), json!([]));
+    set.insert("clipsContent".into(), json!(false));
+    set.insert("children".into(), Value::Array(variants.into_iter().map(|v| Value::Object(v.node)).collect()));
+    let _ = depth;
+    Built { node: set, bbox }
+}
+
+/// Move built node `b` by `dx`, `dy` in its parent's space (the canvas for a top-level one): its
+/// transform, its box and the absolute boxes of everything in it, which the importer reads to tell
+/// which space a group's layers use.
+fn move_by(b: &mut Built, dx: f64, dy: f64, parent: Affine) {
+    if let Some(rt) = b.node.get_mut("relativeTransform").and_then(Value::as_array_mut) {
+        for (row, d) in rt.iter_mut().zip([dx, dy]) {
+            if let Some(e) = row.get_mut(2) {
+                *e = json!(e.as_f64().unwrap_or(0.0) + d);
+            }
+        }
+    }
+    b.bbox = b.bbox + figcraft_doc::geom::Vec2::new(dx, dy);
+    // The same move on the canvas (`parent`: the parent's place there).
+    let [a, bb, c, d, _, _] = parent.as_coeffs();
+    let (dx, dy) = (a * dx + c * dy, bb * dx + d * dy);
+    let mut stack: Vec<&mut Value> = Vec::new();
+    if let Some(bb) = b.node.get_mut("absoluteBoundingBox") {
+        shift_box(bb, dx, dy);
+    }
+    if let Some(Value::Array(kids)) = b.node.get_mut("children") {
+        stack.extend(kids.iter_mut());
+    }
+    while let Some(n) = stack.pop() {
+        let Some(m) = n.as_object_mut() else { continue };
+        if let Some(bb) = m.get_mut("absoluteBoundingBox") {
+            shift_box(bb, dx, dy);
+        }
+        if let Some(Value::Array(kids)) = m.get_mut("children") {
+            stack.extend(kids.iter_mut());
+        }
+    }
+}
+
+fn shift_box(bb: &mut Value, dx: f64, dy: f64) {
+    for (k, d) in [("x", dx), ("y", dy)] {
+        if let Some(e) = bb.get_mut(k) {
+            *e = json!(e.as_f64().unwrap_or(0.0) + d);
+        }
+    }
 }
 
 /// A mask shape: it clips the layers after it and isn't drawn.

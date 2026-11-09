@@ -97,8 +97,12 @@ fn interaction(cx: &mut Cx, it: &Value, at: Option<(f64, f64)>) -> Option<Value>
             json!({"type": "URL", "url": url.chars().take(4096).collect::<String>(), "openInNewTab": true})
         }
         Some("state-transition") => {
-            cx.warn("prototype links that change a component's state were skipped (states are not supported yet)");
-            return None;
+            // The variant of the state it changes to (a component's own id: its default state).
+            let Some(variant) = dest.and_then(|d| cx.state_node(d)) else {
+                cx.warn("prototype links to component states missing from the file were skipped");
+                return None;
+            };
+            json!({"type": "NODE", "destinationId": variant, "navigation": "CHANGE_TO", "transition": transition})
         }
         Some("audio-file-playback" | "speech-playback") => {
             cx.warn("prototype sounds and speech are not supported and were skipped");

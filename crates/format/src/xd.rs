@@ -27,6 +27,8 @@ mod proto_tests;
 mod stack;
 #[cfg(test)]
 mod stack_tests;
+#[cfg(test)]
+mod states_tests;
 mod style;
 #[cfg(test)]
 mod style_tests;
