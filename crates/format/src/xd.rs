@@ -26,6 +26,8 @@ mod grid_tests;
 mod proto;
 #[cfg(test)]
 mod proto_tests;
+#[cfg(test)]
+mod scroll_tests;
 mod stack;
 #[cfg(test)]
 mod stack_tests;
@@ -143,6 +145,8 @@ pub(crate) struct Artboard {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// How much of it a prototype shows at once (`viewportHeight`): less than its height scrolls.
+    pub viewport: Option<f64>,
     /// The artboard's `graphicContent.agc`.
     pub content: Value,
 }
@@ -201,10 +205,11 @@ impl<'b> Archive<'b> {
             let name = place.and_then(|p| p.get("name")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| manifest_name(&manifest, id));
             let (Some(width), Some(height)) = (n("width"), n("height")) else {
                 warnings.push("artboards without a size were imported at their content's place".into());
-                artboards.push(Artboard { id: id.clone(), name, x: 0.0, y: 0.0, width: 0.0, height: 0.0, content });
+                artboards.push(Artboard { id: id.clone(), name, x: 0.0, y: 0.0, width: 0.0, height: 0.0, viewport: None, content });
                 continue;
             };
-            artboards.push(Artboard { id: id.clone(), name, x: n("x").unwrap_or(0.0), y: n("y").unwrap_or(0.0), width, height, content });
+            let viewport = n("viewportHeight").filter(|v| *v > 0.0);
+            artboards.push(Artboard { id: id.clone(), name, x: n("x").unwrap_or(0.0), y: n("y").unwrap_or(0.0), width, height, viewport, content });
         }
         if ids.len() > MAX_ARTBOARDS {
             warnings.push(format!("the file has more than {MAX_ARTBOARDS} artboards; the rest were skipped"));

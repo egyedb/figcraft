@@ -94,6 +94,8 @@ pub(crate) struct Cx<'a> {
     component_depth: usize,
     /// Repeat grids met, and those laid out as grids.
     grids: (usize, usize),
+    /// The screen size of each artboard that scrolls (its width and viewport height).
+    screens: Vec<(String, (f64, f64))>,
 }
 
 impl Cx<'_> {
@@ -177,6 +179,7 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         state_of: HashMap::new(),
         component_depth: 0,
         grids: (0, 0),
+        screens: Vec::new(),
     };
     for (id, list) in archive.protos.as_object().into_iter().flatten() {
         cx.protos.insert(id.as_str(), list);
@@ -214,6 +217,11 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         }
     }
     let mut page = json!({"type": "CANVAS", "id": "0:1", "name": "Page 1", "children": roots});
+    // The prototype's screen: the home artboard's when it scrolls, else the size most scrolling
+    // artboards share (a page has one), so artboards taller than it scroll.
+    if let Some((w, h)) = screen(&cx.screens, archive.home.as_deref()) {
+        page["prototypeDevice"] = json!({"type": "CUSTOM", "size": {"width": w, "height": h}});
+    }
     if !starts.is_empty() {
         page["flowStartingPoints"] = Value::Array(starts);
     }
@@ -362,6 +370,23 @@ fn made_mains(cx: &mut Cx) -> Vec<Value> {
     out
 }
 
+/// The prototype screen size: `home`'s when it scrolls, else the one most scrolling artboards have.
+fn screen(screens: &[(String, (f64, f64))], home: Option<&str>) -> Option<(f64, f64)> {
+    if let Some((_, s)) = screens.iter().find(|(id, _)| Some(id.as_str()) == home) {
+        return Some(*s);
+    }
+    let mut counts: Vec<((f64, f64), usize)> = Vec::new();
+    for (_, s) in screens {
+        match counts.iter_mut().find(|(c, _)| (c.0 - s.0).abs() < 0.5 && (c.1 - s.1).abs() < 0.5) {
+            Some(c) => c.1 += 1,
+            None => counts.push((*s, 1)),
+        }
+    }
+    // The first of the most common, in artboard order.
+    let best = counts.iter().map(|c| c.1).max()?;
+    counts.into_iter().find(|c| c.1 == best).map(|c| c.0)
+}
+
 /// The children of a group or artboard layer.
 fn kids(n: &Value) -> &[Value] {
     let inner = n.get("group").or_else(|| n.get("artboard"));
@@ -442,6 +467,11 @@ fn artboard(cx: &mut Cx, ab: &super::Artboard) -> Option<JsonMap<String, Value>>
     node.insert("fills".into(), Value::Array(fills));
     unsupported(cx, root);
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
+    // Taller than its viewport: it scrolls up and down in a prototype.
+    if let Some(v) = ab.viewport.filter(|v| *v + 0.5 < h) {
+        node.insert("overflowDirection".into(), json!("VERTICAL_SCROLLING"));
+        cx.screens.push((ab.id.clone(), (w, v)));
+    }
     let ints = super::proto::interactions(cx, &ab.id, Some((ab.x, ab.y)));
     if !ints.is_empty() {
         node.insert("interactions".into(), Value::Array(ints));
@@ -530,6 +560,10 @@ fn layer(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: usize
     if let Some(id) = str_field(l, "id") {
         link_protos(cx, id, &mut built);
     }
+    // Fixed when its artboard scrolls.
+    if l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("fixed")).and_then(Value::as_bool) == Some(true) {
+        built.node.insert("scrollBehavior".into(), json!("FIXED"));
+    }
     Some(built)
 }
 
@@ -608,9 +642,6 @@ fn weight(l: &Value) -> usize {
 fn unsupported(cx: &mut Cx, l: &Value) {
     let Some(ux) = l.get("meta").and_then(|m| m.get("ux")) else { return };
     let has = |k: &str| ux.get(k).is_some_and(|v| !v.is_null());
-    if has("scrollingType") || ux.get("fixed").and_then(Value::as_bool) == Some(true) {
-        cx.warn("scroll groups and fixed-position layers are not supported yet: they were imported as plain layers");
-    }
     if has("linkedElementRef") {
         cx.warn("linked library assets were imported as plain copies");
     }
@@ -741,14 +772,17 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
         }
     }
     built.extend(own.into_iter().map(|(_, b)| b));
-    let Some(b) = union(built.iter().map(|b| b.bbox)) else {
+    let Some(content) = union(built.iter().map(|b| b.bbox)) else {
         // An empty group shows nothing.
         return None;
     };
+    // A scroll group: a frame of its viewport that clips and scrolls its layers.
+    let scroll = if auto.is_none() && !masked { scroll_viewport(l, content) } else { None };
+    let b = scroll.map_or(content, |(r, _)| r);
     let built = shift(built, b.x0, b.y0);
     let mut node = JsonMap::new();
-    // Auto layout needs a frame.
-    let ty = if auto.is_some() && ty == "GROUP" { "FRAME" } else { ty };
+    // Auto layout and scrolling need a frame.
+    let ty = if (auto.is_some() || scroll.is_some()) && ty == "GROUP" { "FRAME" } else { ty };
     let bbox = place(cx, l, ty, world * Affine::translate((b.x0, b.y0)), b.width(), b.height(), origin, root, &mut node);
     style::apply(cx, l.get("style"), b.width(), b.height(), false, &mut node);
     node.remove("fills");
@@ -774,8 +808,39 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
     if let Some(a) = auto {
         node.extend(a);
     }
+    if let Some((_, direction)) = scroll {
+        node.insert("clipsContent".into(), json!(true));
+        node.insert("overflowDirection".into(), json!(direction));
+    }
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
     Some(Built { node, bbox })
+}
+
+/// A scroll group's viewport (in the group's space, its layers' box being `content`) and scroll
+/// direction. XD keeps the layers where they show and the viewport `offsetX` / `offsetY` from
+/// where they start (negative: they start inside it); across the scrolling the viewport is as
+/// large as they are.
+fn scroll_viewport(l: &Value, content: Rect) -> Option<(Rect, &'static str)> {
+    let ux = l.get("meta").and_then(|m| m.get("ux"))?;
+    let n = |k: &str| num(ux, k);
+    match str_field(ux, "scrollingType")? {
+        "horizontal" => {
+            let w = n("viewportWidth").filter(|w| *w > 0.0)?.min(MAX_SIZE);
+            let x0 = content.x0 + n("offsetX").unwrap_or(0.0);
+            Some((Rect::new(x0, content.y0, x0 + w, content.y1), "HORIZONTAL_SCROLLING"))
+        }
+        "vertical" => {
+            let h = n("viewportHeight").filter(|h| *h > 0.0)?.min(MAX_SIZE);
+            let y0 = content.y0 + n("offsetY").unwrap_or(0.0);
+            Some((Rect::new(content.x0, y0, content.x1, y0 + h), "VERTICAL_SCROLLING"))
+        }
+        "panning" => {
+            let (w, h) = (n("viewportWidth").filter(|w| *w > 0.0)?.min(MAX_SIZE), n("viewportHeight").filter(|h| *h > 0.0)?.min(MAX_SIZE));
+            let (x0, y0) = (content.x0 + n("offsetX").unwrap_or(0.0), content.y0 + n("offsetY").unwrap_or(0.0));
+            Some((Rect::new(x0, y0, x0 + w, y0 + h), "HORIZONTAL_AND_VERTICAL_SCROLLING"))
+        }
+        _ => None,
+    }
 }
 
 /// Main `main` (built from `l`, component `sid`, placed at `world`) as a component set when its
