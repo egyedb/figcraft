@@ -764,7 +764,7 @@ fn arrows(ui: &Ui, recents: &mut Recents, files: &[Shown], across: usize, down: 
 fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, file: &Shown) {
     let r = Rect::from_center_size(center, vec2(16.0, 16.0));
     match FileKind::of(Path::new(&file.path)) {
-        FileKind::FigCraft | FileKind::Fig | FileKind::Sketch => {
+        FileKind::FigCraft | FileKind::Fig | FileKind::Sketch | FileKind::Xd => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.accent);
             icons::paint(ui.painter(), r.shrink(3.0), icons::file_mark(file.kind), t.accent_on);
         }

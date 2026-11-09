@@ -1,5 +1,6 @@
 //! The picture a saved file carries of itself: `thumbnail.png` inside a `.figcraft` or `.fig` zip,
-//! `previews/preview.png` inside a `.sketch` zip (the home screen's recent files show it), and the colour of the page it sits on. Image files are
+//! `previews/preview.png` inside a `.sketch` zip, `thumbnail.png` (else `preview.png`) inside an `.xd`
+//! zip (the home screen's recent files show it), and the colour of the page it sits on. Image files are
 //! their own picture. Everything is read within caps: a missing, damaged or oversized picture gives
 //! `None`, never an error or a panic.
 
@@ -39,6 +40,13 @@ pub fn sketch_preview_png<R: Read + Seek>(archive: R) -> Option<Vec<u8>> {
     crate::read_member(&mut z, "previews/preview.png", MAX_THUMBNAIL_BYTES).ok()
 }
 
+/// The bytes of the picture an `.xd` zip carries of itself: `thumbnail.png`, else the larger
+/// `preview.png`; `None` as [`thumbnail_png`] gives it.
+pub fn xd_preview_png<R: Read + Seek>(archive: R) -> Option<Vec<u8>> {
+    let mut z = zip::ZipArchive::new(archive).ok()?;
+    crate::read_member(&mut z, "thumbnail.png", MAX_THUMBNAIL_BYTES).or_else(|_| crate::read_member(&mut z, "preview.png", MAX_THUMBNAIL_BYTES)).ok()
+}
+
 /// Decode a picture (PNG, JPEG, WebP, GIF, BMP or TIFF) no larger than [`MAX_THUMBNAIL_SIDE`] on
 /// either side, scaled down to at most `fit` pixels on its longer side (never up).
 pub fn decode_thumbnail(bytes: &[u8], fit: u32) -> Option<Thumbnail> {
@@ -70,6 +78,8 @@ pub enum FileKind {
     Fig,
     /// `.sketch`
     Sketch,
+    /// `.xd`
+    Xd,
     /// `.svg`
     Svg,
     /// A raster image (`.png`, `.jpg`, `.webp`, …).
@@ -85,6 +95,7 @@ impl FileKind {
             // A FigJam `.jam` is the same archive.
             "fig" | "jam" => FileKind::Fig,
             "sketch" => FileKind::Sketch,
+            "xd" => FileKind::Xd,
             "svg" => FileKind::Svg,
             "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" => FileKind::Image,
             _ => FileKind::Other,
@@ -93,7 +104,7 @@ impl FileKind {
 }
 
 /// The picture of the file at `path`, at most `fit` pixels on its longer side: the thumbnail a
-/// `.figcraft`, `.fig` or `.sketch` file carries, or an image file itself (up to [`MAX_IMAGE_FILE_BYTES`]).
+/// `.figcraft`, `.fig`, `.sketch` or `.xd` file carries, or an image file itself (up to [`MAX_IMAGE_FILE_BYTES`]).
 /// `None` for anything else, and for a file that is missing, unreadable or damaged.
 pub fn file_thumbnail(path: &Path, fit: u32) -> Option<Thumbnail> {
     match FileKind::of(path) {
@@ -105,6 +116,11 @@ pub fn file_thumbnail(path: &Path, fit: u32) -> Option<Thumbnail> {
         FileKind::Sketch => {
             let file = std::fs::File::open(path).ok()?;
             let png = sketch_preview_png(std::io::BufReader::new(file))?;
+            decode_thumbnail(&png, fit)
+        }
+        FileKind::Xd => {
+            let file = std::fs::File::open(path).ok()?;
+            let png = xd_preview_png(std::io::BufReader::new(file))?;
             decode_thumbnail(&png, fit)
         }
         FileKind::Image => {
@@ -127,7 +143,7 @@ pub fn file_thumbnail(path: &Path, fit: u32) -> Option<Thumbnail> {
 pub struct Preview {
     pub page: Option<[f32; 4]>,
     pub picture: Option<Thumbnail>,
-    /// A design file or a board (`.fig` and `.sketch` files and images: design).
+    /// A design file or a board (`.fig`, `.sketch` and `.xd` files and images: design).
     pub kind: figcraft_doc::FileKind,
 }
 
@@ -139,8 +155,8 @@ pub fn file_preview(path: &Path, fit: u32) -> Preview {
             let Ok(file) = std::fs::File::open(path) else { return Preview::default() };
             archive_preview(std::io::BufReader::new(file), fit)
         }
-        // A Sketch file's page colour isn't read: the preview is its picture alone, as for an image.
-        FileKind::Sketch | FileKind::Image => Preview { picture: file_thumbnail(path, fit), ..Preview::default() },
+        // A Sketch or XD file's page colour isn't read: the preview is its picture alone, as for an image.
+        FileKind::Sketch | FileKind::Xd | FileKind::Image => Preview { picture: file_thumbnail(path, fit), ..Preview::default() },
         FileKind::Svg | FileKind::Other => Preview::default(),
     }
 }

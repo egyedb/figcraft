@@ -117,13 +117,23 @@ fn files_on_disk_by_kind() {
     let folder = d.join("folder.figcraft");
     std::fs::create_dir_all(&folder).unwrap();
     assert_eq!(file_thumbnail(&folder, 640), None);
-    let kinds: Vec<FileKind> = ["a.figcraft", "a.FIG", "a.Sketch", "a.svg", "a.jpeg", "a.webp", "a.txt", "noext"]
+    let kinds: Vec<FileKind> = ["a.figcraft", "a.FIG", "a.Sketch", "a.XD", "a.svg", "a.jpeg", "a.webp", "a.txt", "noext"]
         .iter()
         .map(|p| FileKind::of(std::path::Path::new(p)))
         .collect();
     assert_eq!(
         kinds,
-        [FileKind::FigCraft, FileKind::Fig, FileKind::Sketch, FileKind::Svg, FileKind::Image, FileKind::Image, FileKind::Other, FileKind::Other]
+        [
+            FileKind::FigCraft,
+            FileKind::Fig,
+            FileKind::Sketch,
+            FileKind::Xd,
+            FileKind::Svg,
+            FileKind::Image,
+            FileKind::Image,
+            FileKind::Other,
+            FileKind::Other
+        ]
     );
 }
 
@@ -201,6 +211,28 @@ fn sketch_files_show_their_preview_png() {
     std::fs::write(&other, zip(&[("thumbnail.png", &png(8, 4))])).unwrap();
     assert_eq!(file_thumbnail(&other, 640), None);
     let junk = d.join("junk.sketch");
+    std::fs::write(&junk, [0xFFu8; 64]).unwrap();
+    assert_eq!(file_preview(&junk, 640), Preview::default());
+}
+
+#[test]
+fn xd_files_show_their_thumbnail_else_their_preview() {
+    use crate::thumbnail::{Preview, file_preview};
+    let d = dir("xd");
+    let xd = d.join("screens.xd");
+    std::fs::write(
+        &xd,
+        zip(&[("mimetype", b"application/vnd.adobe.sparkler.project+dcxucf"), ("thumbnail.png", &png(8, 4)), ("preview.png", &png(16, 8))]),
+    )
+    .unwrap();
+    assert_eq!(file_thumbnail(&xd, 640).map(|t| (t.width, t.height)), Some((8, 4)));
+    let p = file_preview(&xd, 640);
+    assert_eq!((p.page, p.picture.map(|t| (t.width, t.height)), p.kind), (None, Some((8, 4)), figcraft_doc::FileKind::Design));
+    // Without a thumbnail, the preview; a damaged file has no picture.
+    let preview_only = d.join("preview.xd");
+    std::fs::write(&preview_only, zip(&[("preview.png", &png(16, 8))])).unwrap();
+    assert_eq!(file_thumbnail(&preview_only, 640).map(|t| (t.width, t.height)), Some((16, 8)));
+    let junk = d.join("junk.xd");
     std::fs::write(&junk, [0xFFu8; 64]).unwrap();
     assert_eq!(file_preview(&junk, 640), Preview::default());
 }
