@@ -63,6 +63,18 @@
     ],
     [
       "-1",
+      "Software\\Classes\\Figcraft.Xd\\shell\\open\\command",
+      "",
+      "\"[#FigcraftExe]\" \"%1\""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.xd\\OpenWithProgids",
+      "Figcraft.Xd",
+      ""
+    ],
+    [
+      "-1",
       "Software\\Classes\\Applications\\figcraft.exe",
       "FriendlyAppName",
       "FigCraft"
@@ -107,6 +119,12 @@
       "-1",
       "Software\\Classes\\Applications\\figcraft.exe\\SupportedTypes",
       ".sketch",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\figcraft.exe\\SupportedTypes",
+      ".xd",
       ""
     ],
     [

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- shared-mime-info definitions for FigCraft's own document type and for Sketch files, which
+<!-- shared-mime-info definitions for FigCraft's own document type and for Sketch and Adobe XD files, which
      FigCraft opens (SVG, PNG and JPEG are already in the system database). Installed to /usr/share/mime/packages/ (update-mime-database runs on
      install). -->
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
@@ -13,5 +13,14 @@
     <comment>Sketch document</comment>
     <sub-class-of type="application/zip"/>
     <glob pattern="*.sketch"/>
+  </mime-type>
+  <!-- Adobe XD saves a zip whose first, stored member `mimetype` names this type, as in ODF files. -->
+  <mime-type type="application/vnd.adobe.sparkler.project+dcxucf">
+    <comment>Adobe XD document</comment>
+    <sub-class-of type="application/zip"/>
+    <magic priority="50">
+      <match type="string" value="mimetypeapplication/vnd.adobe.sparkler.project+dcxucf" offset="30"/>
+    </magic>
+    <glob pattern="*.xd"/>
   </mime-type>
 </mime-info>
