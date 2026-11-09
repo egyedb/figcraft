@@ -31,7 +31,7 @@ pub(crate) fn fills(cx: &mut Cx, f: Option<&Value>, w: f64, h: f64) -> Vec<Value
     let Some(f) = f else { return Vec::new() };
     match f.get("type").and_then(Value::as_str) {
         Some("solid") => f.get("color").and_then(color).map(|c| vec![json!({"type": "SOLID", "color": c})]).unwrap_or_default(),
-        Some("pattern") => image(cx, f.get("pattern")).into_iter().collect(),
+        Some("pattern") => image(cx, f.get("pattern"), w, h).into_iter().collect(),
         Some("gradient") => gradient(cx, f.get("gradient"), w, h).into_iter().collect(),
         Some("none") | None => Vec::new(),
         Some(other) => {
@@ -42,7 +42,7 @@ pub(crate) fn fills(cx: &mut Cx, f: Option<&Value>, w: f64, h: f64) -> Vec<Value
 }
 
 /// An image fill (`pattern`): the image `meta.ux.uid` names in `resources/`.
-fn image(cx: &mut Cx, p: Option<&Value>) -> Option<Value> {
+fn image(cx: &mut Cx, p: Option<&Value>, w: f64, h: f64) -> Option<Value> {
     let p = p?;
     let ux = p.get("meta").and_then(|m| m.get("ux"));
     let Some(uid) = ux.and_then(|u| u.get("uid")).and_then(Value::as_str) else {
@@ -58,7 +58,34 @@ fn image(cx: &mut Cx, p: Option<&Value>) -> Option<Value> {
         Some("stretch") => "STRETCH",
         _ => "FILL",
     };
+    if let Some(t) = ux.and_then(|u| placed(p, u, w, h)) {
+        return Some(json!({"type": "IMAGE", "scaleMode": "STRETCH", "imageRef": uid, "imageTransform": t}));
+    }
     Some(json!({"type": "IMAGE", "scaleMode": mode, "imageRef": uid}))
+}
+
+/// The image transform of a covering image moved or zoomed in its shape (`scale`, `offsetX`,
+/// `offsetY` in `meta.ux`), or `None` when it isn't. XD draws the image at its covering size
+/// times `scale`, centred, then moved by the offsets in units of its covering size. The REST
+/// transform maps the shape's unit box into the image's.
+fn placed(p: &Value, ux: &Value, w: f64, h: f64) -> Option<Value> {
+    let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
+    if n(ux, "scale").is_none() && n(ux, "offsetX").is_none() && n(ux, "offsetY").is_none() {
+        return None;
+    }
+    // The image's own size in pixels.
+    let (pw, ph) = (n(p, "width").filter(|v| *v > 0.0)?, n(p, "height").filter(|v| *v > 0.0)?);
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let cover = (w / pw).max(h / ph);
+    let scale = n(ux, "scale").filter(|s| *s > 0.0).unwrap_or(1.0).clamp(0.01, 100.0);
+    let (cw, ch) = (pw * cover, ph * cover);
+    let (dw, dh) = (cw * scale, ch * scale);
+    let x0 = (w - dw) / 2.0 + n(ux, "offsetX").unwrap_or(0.0).clamp(-100.0, 100.0) * cw;
+    let y0 = (h - dh) / 2.0 + n(ux, "offsetY").unwrap_or(0.0).clamp(-100.0, 100.0) * ch;
+    let t = [w / dw, h / dh, -x0 / dw, -y0 / dh];
+    t.iter().all(|v| v.is_finite()).then(|| json!([[t[0], 0.0, t[2]], [0.0, t[1], t[3]]]))
 }
 
 /// A gradient fill: linear (`x1`…`y2`) or radial (`cx`, `cy`, `r`), its stops in

@@ -81,3 +81,29 @@ fn colours_as_argb_numbers() {
     assert!(super::style::color(&json!({"value": "red"})).is_none());
     assert!(super::style::color(&json!({"value": u64::MAX})).is_none());
 }
+
+#[test]
+fn moved_and_zoomed_images_keep_xds_crop() {
+    // A 1600 × 1168 image covering a 417 px square, zoomed 1.0889 times and moved: XD puts its
+    // top edge on the square's (centred, the zoom would hide 18.5 px above; the offset of
+    // 0.0445 of its covering height brings it back down).
+    let n = styled(json!({"fill": {"type": "pattern", "pattern": {"width": 1600, "height": 1168, "href": "",
+        "meta": {"ux": {"scaleBehavior": "cover", "uid": "abc123", "scale": 1.0889, "offsetX": -0.0791, "offsetY": 0.0445}}}}}));
+    let PaintKind::Image(img) = &n.fills[0].kind else { panic!("{:?}", n.fills) };
+    let [a, _, _, d, e, f] = img.crop.unwrap_or_else(|| panic!("no crop: {img:?}"));
+    let (w, h) = (100.0_f64, 50.0_f64);
+    // The shape here is 100 × 50 (the fixture's): recompute what XD does for it.
+    let cover = (w / 1600.0_f64).max(h / 1168.0);
+    let (cw, ch) = (1600.0 * cover, 1168.0 * cover);
+    let (dw, dh) = (cw * 1.0889, ch * 1.0889);
+    let (x0, y0) = ((w - dw) / 2.0 - 0.0791 * cw, (h - dh) / 2.0 + 0.0445 * ch);
+    assert!((a - w / dw).abs() < 1e-9 && (d - h / dh).abs() < 1e-9);
+    assert!((e + x0 / dw).abs() < 1e-9 && (f + y0 / dh).abs() < 1e-9);
+    // Without a scale or offsets the image just covers the shape.
+    let plain = styled(
+        json!({"fill": {"type": "pattern", "pattern": {"width": 16, "height": 9, "href": "", "meta": {"ux": {"scaleBehavior": "cover", "uid": "abc123"}}}}}),
+    );
+    let PaintKind::Image(img) = &plain.fills[0].kind else { panic!() };
+    assert_eq!(img.scale_mode, figcraft_doc::color::ImageScaleMode::Fill);
+    assert!(img.crop.is_none());
+}
