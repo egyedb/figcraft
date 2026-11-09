@@ -652,6 +652,8 @@ mod widget_panel_tests;
 mod widget_shapes_tests;
 #[cfg(test)]
 mod widgets_tests;
+#[cfg(test)]
+mod xd_import_tests;
 
 #[cfg(test)]
 mod selection_reorder_tests;

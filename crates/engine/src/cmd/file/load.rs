@@ -137,6 +137,9 @@ fn load_any(
             if let Some(r) = load_sketch(bytes, &file_stem(name_hint)) {
                 return Ok((r?, true));
             }
+            if let Some(r) = load_xd(bytes, &file_stem(name_hint)) {
+                return Ok((r?, true));
+            }
             if let Some(r) = figcraft_format::rest::try_import_with(bytes, variables, images) {
                 let (mut doc, warnings) = r.map_err(|e| EngineError::Other(e.to_string()))?;
                 link_instances(&mut doc);
@@ -171,6 +174,58 @@ fn load_sketch(bytes: &[u8], name: &str) -> Option<Result<figcraft_format::Loade
         reflow_overridden_text(&mut doc);
         figcraft_format::Loaded { issues: warnings, ..doc.into() }
     }))
+}
+
+/// Gives `None` when `bytes` are not an `.xd` file. Then other readers can try.
+fn load_xd(bytes: &[u8], name: &str) -> Option<Result<figcraft_format::Loaded>> {
+    if !figcraft_format::xd::is_xd(bytes) {
+        return None;
+    }
+    // The import reads the installed fonts' names and metrics: the system's must be known first.
+    figcraft_text::fontdb::scan_system_fonts();
+    let fonts = figcraft_format::xd::Fonts {
+        face: Some(Box::new(figcraft_text::fontdb::postscript_face)),
+        metrics: Some(Box::new(|family: &str, style: &str| {
+            let f = figcraft_text::fontdb::has_family(family).then(|| figcraft_text::fontdb::find_face(family, style)).flatten()?;
+            (f.upem > 0.0).then(|| (f.ascent / f.upem, f.descent / f.upem))
+        })),
+    };
+    let r = figcraft_format::xd::try_import_with_fonts(bytes, name, fonts)?;
+    Some(r.map_err(|e| EngineError::Other(e.to_string())).map(|(mut doc, warnings)| {
+        match_font_families(&mut doc);
+        fit_point_texts(&mut doc);
+        link_instances(&mut doc);
+        figcraft_format::Loaded { issues: warnings, ..doc.into() }
+    }))
+}
+
+/// Texts that grow with their content (XD's point texts) take the width FigCraft measures,
+/// keeping their aligned edge: a centred one stays centred on XD's point, a right-aligned one
+/// keeps its right edge. The import could only guess their width.
+fn fit_point_texts(doc: &mut Document) {
+    let ids: Vec<NodeId> = doc
+        .nodes()
+        .filter(|n| matches!(&n.kind, NodeKind::Text(t) if t.auto_resize == figcraft_doc::TextAutoResize::WidthAndHeight))
+        .map(|n| n.id)
+        .collect();
+    for id in ids {
+        let Some((w, h)) = doc.node(id).and_then(figcraft_text::auto_size) else { continue };
+        let shift = doc.node(id).map_or(0.0, |n| match &n.kind {
+            NodeKind::Text(t) => match t.align_h {
+                figcraft_doc::TextAlignH::Center => (n.width - w) / 2.0,
+                figcraft_doc::TextAlignH::Right => n.width - w,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        });
+        figcraft_layout::set_size(doc, id, w, h);
+        if shift.is_finite()
+            && shift != 0.0
+            && let Some(n) = doc.node_mut(id)
+        {
+            n.transform *= figcraft_doc::geom::Affine::translate((shift, 0.0));
+        }
+    }
 }
 
 /// Instances of a stack sized apart from their main are laid out at their size, and texts in
