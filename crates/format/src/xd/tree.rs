@@ -138,19 +138,25 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
     Map { json, warnings: cx.warnings, networks: cx.networks }
 }
 
-/// Index the layers of the component definitions by id.
+/// Index the layers of the component definitions by id, their states' and masks' too.
 fn index_symbols<'a>(cx: &mut Cx<'a>, resources: &'a Value) {
     let symbols = resources.get("resources").and_then(|r| r.get("meta")).and_then(|m| m.get("ux")).and_then(|u| u.get("symbols"));
     let mut stack: Vec<&Value> = symbols.and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
-    while let Some(n) = stack.pop() {
+    // Other states come after every main definition: an id in both is the main one's.
+    let mut states: Vec<&Value> = Vec::new();
+    while let Some(n) = stack.pop().or_else(|| states.pop()) {
         if cx.symbols.len() >= MAX_SYMBOL_INDEX {
             cx.warn("the file's components hold more layers than the import reads; some component copies were skipped");
             break;
         }
         if let Some(id) = n.get("id").and_then(Value::as_str) {
-            cx.symbols.insert(id, n);
+            cx.symbols.entry(id).or_insert(n);
         }
         stack.extend(kids(n));
+        // A group's mask and a component's other states hold layers references name too.
+        let ux = n.get("meta").and_then(|m| m.get("ux"));
+        stack.extend(ux.and_then(|u| u.get("clipPathResources")).map_or(&[][..], |c| list(c, "children")));
+        states.extend(ux.and_then(|u| u.get("states")).and_then(Value::as_array).into_iter().flatten());
     }
 }
 
@@ -313,7 +319,28 @@ fn sync_ref(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: us
         cx.warn("component layers whose definition is missing from the file were skipped");
         return None;
     };
-    let weight = weight(src);
+    // A reference that lists children of its own keeps them (they carry the instance's
+    // overrides, an image or a text changed); only the layer's own properties come from the
+    // definition.
+    let own = l.get("group").filter(|g| g.get("children").is_some());
+    let merged;
+    let src = match own {
+        Some(group) => {
+            let mut m: JsonMap<String, Value> = src
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(k, _)| k.as_str() != "group" && k.as_str() != "artboard")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            m.insert("group".into(), group.clone());
+            merged = Value::Object(m);
+            &merged
+        }
+        None => src,
+    };
+    // Children of its own are counted as the walk meets them; a whole definition's up front.
+    let weight = if own.is_some() { 1 } else { weight(src) };
     if cx.sync_work.saturating_add(weight) > MAX_SYNC_WORK {
         cx.warn("the file's components copy in more layers than the import handles; the copies past that were skipped");
         return None;

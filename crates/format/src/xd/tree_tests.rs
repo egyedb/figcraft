@@ -192,3 +192,37 @@ fn prototype_interactions_are_noted() {
     let (_, warnings) = import(&z, "f").unwrap();
     assert!(warnings.iter().any(|w| w.contains("prototype interactions")), "{warnings:?}");
 }
+
+#[test]
+fn a_reference_with_children_of_its_own_keeps_them() {
+    // The definition: a group holding a red picture. The instance's reference lists its own
+    // child, a blue one (an override), which is what XD shows.
+    let def = json!({"type": "group", "id": "DEF", "name": "Card", "transform": translate(5.0, 0.0), "group": {"children": [
+        {"type": "shape", "id": "PIC", "name": "Picture", "style": {"fill": rgb(255, 0, 0)}, "shape": {"type": "rect", "x": 0, "y": 0, "width": 10, "height": 10}}
+    ]}});
+    let r = json!({"type": "syncRef", "syncSourceGuid": "DEF", "guid": "g", "group": {"children": [
+        {"type": "shape", "id": "LOCAL", "name": "Override", "style": {"fill": rgb(0, 0, 255)}, "shape": {"type": "rect", "x": 0, "y": 0, "width": 10, "height": 10}}
+    ]}});
+    let z = xd_zip(&[board("A", (0.0, 0.0, 100.0, 100.0), vec![group("Inst", None, vec![r])])], vec![], vec![def], &[]);
+    let (doc, _) = import(&z, "f").unwrap();
+    assert!(doc.nodes().all(|n| n.name != "Picture"));
+    let card = node(&doc, "Card");
+    assert_eq!(doc.node(card.children[0]).unwrap().name, "Override");
+    // The definition's own transform still applies.
+    assert!(close(origin_on_page(&doc, "Override"), Point::new(5.0, 0.0)));
+}
+
+#[test]
+fn references_find_layers_inside_component_states() {
+    // The footer's background is defined only inside the component's other state.
+    let def = json!({"type": "group", "id": "MAIN", "name": "Main", "meta": {"ux": {"symbolId": "S", "states": [
+        {"type": "group", "id": "STATE", "name": "Short", "group": {"children": [
+            {"type": "shape", "id": "BG", "name": "Footer bg", "style": {"fill": rgb(11, 182, 222)}, "shape": {"type": "rect", "x": 0, "y": 0, "width": 50, "height": 20}}
+        ]}}
+    ]}}, "group": {"children": []}});
+    let r = json!({"type": "syncRef", "syncSourceGuid": "BG", "guid": "g"});
+    let z = xd_zip(&[board("A", (0.0, 0.0, 100.0, 100.0), vec![group("Footer", None, vec![r])])], vec![], vec![def], &[]);
+    let (doc, warnings) = import(&z, "f").unwrap();
+    assert!(doc.nodes().any(|n| n.name == "Footer bg"), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("definition is missing")), "{warnings:?}");
+}
