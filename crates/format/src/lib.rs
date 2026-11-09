@@ -24,6 +24,7 @@ pub mod penpot;
 pub mod rest;
 pub mod sketch;
 pub mod thumbnail;
+pub mod xd;
 
 pub use density::{pixel_density, placed_size};
 pub use library::{is_valid_library_id, read_library, read_library_within};

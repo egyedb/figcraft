@@ -33,7 +33,7 @@ mod symbols;
 mod symbols_tests;
 #[cfg(test)]
 mod tests;
-mod text;
+pub(crate) mod text;
 #[cfg(test)]
 mod text_tests;
 mod tree;
