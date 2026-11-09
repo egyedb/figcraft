@@ -20,7 +20,7 @@ fn import_one(layer: serde_json::Value) -> (Document, Vec<String>) {
 }
 
 fn text<'d>(doc: &'d Document, name: &str) -> (&'d figcraft_doc::Node, &'d TextData) {
-    let n = doc.nodes().find(|n| n.name == name).unwrap();
+    let n = doc.nodes().find(|n| n.name == name && matches!(n.kind, NodeKind::Text(_))).unwrap();
     let NodeKind::Text(t) = &n.kind else { panic!("not text") };
     (n, t)
 }
@@ -135,4 +135,42 @@ fn line_height_falls_back_to_xds_line_spacing() {
     let (doc, _) = import_one(t);
     assert_eq!(text(&doc, "Two").1.style.line_height, LineHeight::Pixels(14.0));
     let _ = Point::ZERO;
+}
+
+#[test]
+fn control_characters_xd_keeps_are_invisible_and_keep_run_ranges() {
+    let mut t = point_text("Code", 0.0, 50.0, "code:\u{3}GO");
+    t["meta"]["ux"]["rangedStyles"] = json!([
+        {"length": 6, "fontFamily": "Arial", "fontStyle": "Regular", "postscriptName": "ArialMT", "fontSize": 20},
+        {"length": 2, "fontFamily": "Arial", "fontStyle": "Bold", "postscriptName": "Arial-BoldMT", "fontSize": 20},
+    ]);
+    let (doc, _) = import_one(t);
+    let (_, td) = text(&doc, "Code");
+    assert_eq!(td.characters, "code:\u{2060}GO");
+    let bold = td.runs.iter().find(|r| r.style.font_style == "Bold").unwrap();
+    assert_eq!((bold.start, bold.end), (6, 8));
+}
+
+#[test]
+fn area_text_xd_laid_out_only_in_part_is_clipped_to_its_box() {
+    let mut t = point_text("Long", 10.0, 20.0, "first line second line third line");
+    t["text"]["frame"] = json!({"type": "area", "width": 120, "height": 50});
+    // XD laid out the first two lines only: the third doesn't fit the box.
+    t["text"]["paragraphs"] = json!([{"lines": [[{"x": 0, "y": 18, "from": 0, "to": 11}], [{"x": 0, "y": 42, "from": 11, "to": 23}]]}]);
+    let (doc, warnings) = import_one(t);
+    let (n, _) = text(&doc, "Long");
+    let parent = doc.node(n.parent.unwrap()).unwrap();
+    assert!(matches!(parent.kind, NodeKind::Frame) && parent.clip, "{:?}", parent.kind);
+    // Down to the end of the second line: 42 - 18 + 24 (its baseline, less FigCraft's first, plus a line).
+    assert_eq!((parent.width, parent.height), (120.0, 48.0));
+    let corner = doc.world_transform(parent.id) * Point::ZERO;
+    assert_eq!((corner.x, corner.y), (10.0, 20.0));
+    assert!(warnings.iter().any(|w| w.contains("overflows its fixed box")), "{warnings:?}");
+    // A box that holds all its text isn't wrapped.
+    let mut fits = point_text("Fits", 10.0, 20.0, "short");
+    fits["text"]["frame"] = json!({"type": "area", "width": 120, "height": 50});
+    fits["text"]["paragraphs"] = json!([{"lines": [[{"x": 0, "y": 18, "from": 0, "to": 5}]]}]);
+    let (doc, _) = import_one(fits);
+    let (n, _) = text(&doc, "Fits");
+    assert_eq!(doc.node(n.parent.unwrap()).unwrap().name, "A");
 }

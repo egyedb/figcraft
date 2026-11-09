@@ -285,9 +285,15 @@ fn layer(cx: &mut Cx, l: &Value, xd_parent: Affine, origin: Affine, depth: usize
         "group" | "artboard" => group(cx, l, world, origin, depth, root)?,
         "shape" => shape(cx, l, world, origin, root)?,
         "text" => {
-            let (mut node, (dx, dy, w, h)) = super::text::node(cx, l)?;
-            let bbox = place(cx, l, "TEXT", world * Affine::translate((dx, dy)), w, h, origin, root, &mut node);
-            Built { node, bbox }
+            let super::text::Laid { mut node, rect, clip } = super::text::node(cx, l)?;
+            match clip {
+                None => {
+                    let (dx, dy, w, h) = rect;
+                    let bbox = place(cx, l, "TEXT", world * Affine::translate((dx, dy)), w, h, origin, root, &mut node);
+                    Built { node, bbox }
+                }
+                Some(size) => clipped_text(cx, l, node, world, rect, size, origin, root),
+            }
         }
         other => {
             cx.warn(format!("XD {} layers are not supported yet and were skipped", clip(other)));
@@ -377,7 +383,8 @@ fn place(cx: &mut Cx, l: &Value, ty: &str, world: Affine, w: f64, h: f64, origin
         "GROUP" => "Group",
         _ => "Shape",
     };
-    let name: String = str_field(l, "name").filter(|n| !n.is_empty()).unwrap_or(default).chars().take(512).collect();
+    let name: String =
+        str_field(l, "name").filter(|n| !n.is_empty()).unwrap_or(default).chars().filter(|c| !c.is_control() || *c == '\n').take(512).collect();
     node.insert("name".into(), json!(name));
     node.insert("visible".into(), json!(true));
     node.insert("size".into(), json!({"x": w, "y": h}));
@@ -390,6 +397,29 @@ fn place(cx: &mut Cx, l: &Value, ty: &str, world: Affine, w: f64, h: f64, origin
         node.insert("absoluteBoundingBox".into(), json!({"x": bb.x0, "y": bb.y0, "width": bb.width(), "height": bb.height()}));
     }
     local.transform_rect_bbox(Rect::new(0.0, 0.0, w, h))
+}
+
+/// A text whose fixed box shows only part of it, in a frame of that box that clips the rest
+/// (XD hides the lines that don't fit; FigCraft text would show them).
+#[allow(clippy::too_many_arguments)]
+fn clipped_text(
+    cx: &mut Cx,
+    l: &Value,
+    mut text: JsonMap<String, Value>,
+    world: Affine,
+    (dx, dy, w, h): (f64, f64, f64, f64),
+    (cw, ch): (f64, f64),
+    origin: Affine,
+    root: bool,
+) -> Built {
+    cx.warn("text that overflows its fixed box was put in a clipping frame of that box, as XD hides what doesn't fit");
+    let mut frame = JsonMap::new();
+    let bbox = place(cx, &json!({"name": str_field(l, "name").unwrap_or("Text")}), "FRAME", world, cw, ch, origin, root, &mut frame);
+    frame.insert("clipsContent".into(), json!(true));
+    frame.insert("fills".into(), json!([]));
+    place(cx, l, "TEXT", world * Affine::translate((dx, dy)), w, h, world, false, &mut text);
+    frame.insert("children".into(), json!([Value::Object(text)]));
+    Built { node: frame, bbox }
 }
 
 /// A group (or an artboard inside a group, which XD doesn't make): sized to its children, its

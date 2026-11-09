@@ -27,16 +27,23 @@ const FALLBACK_METRICS: (f64, f64) = (0.93, 0.24);
 /// which the engine measures again.
 const AVERAGE_ADVANCE: f64 = 0.55;
 
-/// A text box relative to its layer: `(x, y, width, height)`.
-pub(crate) type TextBox = (f64, f64, f64, f64);
+/// A text layer mapped: its TEXT node (without its place), its box relative to the layer
+/// (`x`, `y`, `width`, `height`), and the size of the area that clips it when XD's fixed box
+/// shows only part of the text.
+pub(crate) struct Laid {
+    pub node: JsonMap<String, Value>,
+    pub rect: (f64, f64, f64, f64),
+    pub clip: Option<(f64, f64)>,
+}
 
-/// A text layer `l` as a TEXT node (without its place), and its box relative to the layer:
-/// `(x, y, width, height)`.
-pub(crate) fn node(cx: &mut Cx, l: &Value) -> Option<(JsonMap<String, Value>, TextBox)> {
+/// A text layer `l` as a TEXT node.
+pub(crate) fn node(cx: &mut Cx, l: &Value) -> Option<Laid> {
     let t = l.get("text")?;
     let raw = str_field(t, "rawText").unwrap_or("");
-    let characters: String = raw.chars().take(MAX_CHARS).collect();
-    if characters.len() < raw.len() {
+    // XD keeps control characters (U+0003 where a line was once broken) that it doesn't draw or
+    // break at: a word joiner, one UTF-16 unit like them, keeps the runs' ranges.
+    let characters: String = raw.chars().take(MAX_CHARS).map(|c| if c.is_control() && c != '\n' && c != '\t' { '\u{2060}' } else { c }).collect();
+    if raw.chars().nth(MAX_CHARS).is_some() {
         cx.warn("very long text was cut to 1,048,576 characters");
     }
     let st = l.get("style");
@@ -116,7 +123,16 @@ pub(crate) fn node(cx: &mut Cx, l: &Value) -> Option<(JsonMap<String, Value>, Te
             (dx, w.max(1.0), content_h)
         }
     };
-    Some((node, (dx, dy, w, h)))
+    // A fixed box XD laid out only part of the text in: the lines that don't fit are hidden.
+    let laid = segments.iter().map(|s| s.to).max().unwrap_or(0);
+    let clip = match (kind, fw, fh) {
+        ("area", Some(w), Some(h)) if !segments.is_empty() && laid < characters.trim_end().encode_utf16().count() => {
+            // XD hides whole lines: the box ends below the last line it laid out.
+            Some((w, h.min(dy + content_h).max(0.0)))
+        }
+        _ => None,
+    };
+    Some(Laid { node, rect: (dx, dy, w, h), clip })
 }
 
 /// One laid-out run of a line.
@@ -125,6 +141,8 @@ struct Segment {
     y: f64,
     /// The first run of its line.
     first_in_line: bool,
+    /// Where it ends in the text (UTF-16 units).
+    to: usize,
     /// The face XD used: PostScript name, family and style.
     face: Option<(String, String, String)>,
 }
@@ -144,7 +162,13 @@ fn segments(t: &Value) -> Vec<Segment> {
                         str_field(f, "style").unwrap_or("").to_string(),
                     ))
                 });
-                out.push(Segment { x: num(seg, "x").unwrap_or(0.0), y: num(seg, "y").unwrap_or(0.0), first_in_line: i == 0, face });
+                out.push(Segment {
+                    x: num(seg, "x").unwrap_or(0.0),
+                    y: num(seg, "y").unwrap_or(0.0),
+                    first_in_line: i == 0,
+                    to: seg.get("to").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(0),
+                    face,
+                });
                 if out.len() > 4 * MAX_RUNS {
                     return out;
                 }
