@@ -107,3 +107,34 @@ fn moved_and_zoomed_images_keep_xds_crop() {
     assert_eq!(img.scale_mode, figcraft_doc::color::ImageScaleMode::Fill);
     assert!(img.crop.is_none());
 }
+
+#[test]
+fn radial_gradients_follow_their_transform() {
+    // Mirrored left to right about x = 0.7: the centre at 0.2 lands at 1.2, the radius points left.
+    let n =
+        styled(json!({"fill": {"type": "gradient", "gradient": {"units": "objectBoundingBox", "cx": 0.2, "cy": 0.5, "fx": 0.2, "fy": 0.5, "r": 0.3,
+        "transform": {"a": -1, "b": 0, "c": 0, "d": 1, "tx": 1.4, "ty": 0},
+        "meta": {"ux": {"gradientResources": {"type": "radial", "stops": [
+            {"offset": 0, "color": {"mode": "RGB", "value": {"r": 255, "g": 0, "b": 0}}},
+            {"offset": 1, "color": {"mode": "RGB", "value": {"r": 0, "g": 0, "b": 255}}}]}}}}}}));
+    let PaintKind::Gradient(g) = &n.fills[0].kind else { panic!("{:?}", n.fills) };
+    let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+    assert!(near(g.from, (1.2, 0.5)), "{:?}", g.from);
+    assert!(near(g.to, (0.9, 0.5)), "{:?}", g.to);
+}
+
+#[test]
+fn image_colour_adjustments_become_filters() {
+    let fill = |params: serde_json::Value| {
+        json!({"fill": {"type": "pattern", "pattern": {"width": 4, "height": 4, "href": "",
+            "meta": {"ux": {"scaleBehavior": "cover", "uid": "abc123"}}, "uxdesign#colorTransform": {"params": params}}}})
+    };
+    let n = styled(fill(json!({"h": 0, "s": -0.5, "b": 0.1, "c": 0})));
+    let PaintKind::Image(img) = &n.fills[0].kind else { panic!() };
+    assert!((img.filters.saturation + 0.5).abs() < 1e-6);
+    // Brighter: more exposure, contrast lowered so mid-grey rises by the brightness.
+    assert!(img.filters.exposure > 0.0 && img.filters.contrast < 0.0, "{:?}", img.filters);
+    let untouched = styled(fill(json!({"h": 0, "s": 0, "b": 0, "c": 0})));
+    let PaintKind::Image(img) = &untouched.fills[0].kind else { panic!() };
+    assert!(img.filters.is_identity());
+}

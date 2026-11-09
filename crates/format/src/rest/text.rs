@@ -107,6 +107,11 @@ fn paragraph(s: &Value, td: &mut TextData) {
 /// `base` with the fields `s` sets (override table entries only carry what differs).
 fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
     let mut t = base.clone();
+    // FigCraft's own field: the text style these characters link to (the `.xd` import gives it
+    // per run), kept only when the file defines that style.
+    if let Some(id) = text(s, "_textStyleId").filter(|id| cx.style_ids.contains(*id)) {
+        t.style_id = Some(id.to_string());
+    }
     if let Some(f) = text(s, "fontFamily").filter(|f| !f.trim().is_empty()) {
         t.font_family = super::props::clip_str(f).to_string();
     }

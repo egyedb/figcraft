@@ -263,3 +263,13 @@ fn references_find_layers_inside_component_states() {
     assert!(doc.nodes().any(|n| n.name == "Footer bg"), "{warnings:?}");
     assert!(!warnings.iter().any(|w| w.contains("definition is missing")), "{warnings:?}");
 }
+
+#[test]
+fn rounded_polygons_have_curved_corners() {
+    let poly = json!({"type": "shape", "id": "Tri", "name": "Tri", "style": {"fill": rgb(0, 0, 0)},
+        "shape": {"type": "polygon", "uxdesign#cornerCount": 3, "uxdesign#cornerRadius": 3, "points": [{"x": 14, "y": 0}, {"x": 28, "y": 22}, {"x": 0, "y": 22}]}});
+    let (doc, warnings) = one_board(vec![poly]);
+    let NodeKind::Vector { network } = &node(&doc, "Tri").kind else { panic!() };
+    assert!(network.segments.iter().any(|s| !s.is_straight()), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("rounded polygon")), "{warnings:?}");
+}

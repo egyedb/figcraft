@@ -174,3 +174,21 @@ fn area_text_xd_laid_out_only_in_part_is_clipped_to_its_box() {
     let (n, _) = text(&doc, "Fits");
     assert_eq!(doc.node(n.parent.unwrap()).unwrap().name, "A");
 }
+
+#[test]
+fn whole_superscript_texts_take_the_fonts_figures() {
+    let mut t = point_text("Sup", 0.0, 50.0, "365");
+    t["meta"]["ux"]["rangedStyles"][0]["textScript"] = json!("superscript");
+    let (doc, warnings) = import_one(t);
+    let (_, td) = text(&doc, "Sup");
+    assert_eq!(td.features.get("sups"), Some(&true), "{warnings:?}");
+    // Part of a text: on the baseline, with a note.
+    let mut part = point_text("Part", 0.0, 90.0, "x2");
+    part["meta"]["ux"]["rangedStyles"] = json!([
+        {"length": 1, "fontFamily": "Arial", "fontStyle": "Regular", "postscriptName": "ArialMT", "fontSize": 20, "textScript": "none"},
+        {"length": 1, "fontFamily": "Arial", "fontStyle": "Regular", "postscriptName": "ArialMT", "fontSize": 20, "textScript": "superscript"},
+    ]);
+    let (doc, warnings) = import_one(part);
+    assert!(text(&doc, "Part").1.features.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("part of a text")), "{warnings:?}");
+}

@@ -49,19 +49,45 @@ fn image(cx: &mut Cx, p: Option<&Value>, w: f64, h: f64) -> Option<Value> {
         cx.warn("image fills without an image in the file were skipped");
         return None;
     };
-    if p.get("uxdesign#colorTransform").is_some() {
-        cx.warn("colour adjustments of image fills were left out");
-    }
+    let filters = p.get("uxdesign#colorTransform").and_then(|t| t.get("params")).and_then(|params| color_filters(cx, params));
     // Both kinds XD writes keep the image's proportions and cover the shape.
     let mode = match ux.and_then(|u| u.get("scaleBehavior")).and_then(Value::as_str) {
         Some("fit" | "contain") => "FIT",
         Some("stretch") => "STRETCH",
         _ => "FILL",
     };
-    if let Some(t) = ux.and_then(|u| placed(p, u, w, h)) {
-        return Some(json!({"type": "IMAGE", "scaleMode": "STRETCH", "imageRef": uid, "imageTransform": t}));
+    let mut paint = match ux.and_then(|u| placed(p, u, w, h)) {
+        Some(t) => json!({"type": "IMAGE", "scaleMode": "STRETCH", "imageRef": uid, "imageTransform": t}),
+        None => json!({"type": "IMAGE", "scaleMode": mode, "imageRef": uid}),
+    };
+    if let Some(f) = filters {
+        paint["filters"] = f;
     }
-    Some(json!({"type": "IMAGE", "scaleMode": mode, "imageRef": uid}))
+    Some(paint)
+}
+
+/// An image fill's colour adjustments (`h` hue, `s` saturation, `b` brightness, `c` contrast,
+/// each 0 when untouched) as REST image filters, `None` when untouched. XD scales the colours
+/// about mid-grey by the contrast and adds the brightness, `(v - 0.5)·(1 + c) + 0.5 + b`;
+/// FigCraft multiplies by the exposure `E` first, `(v·E - 0.5)·k + 0.5`, which agrees for
+/// `k = (1 + c) - 2b` and `E = (1 + c) / k` within its ranges. A brightness past 1 is a
+/// percentage. Hue shifts have no filter and are left out with a note.
+fn color_filters(cx: &mut Cx, params: &Value) -> Option<Value> {
+    let n = |k: &str| params.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
+    let (h, s, c) = (n("h"), n("s"), n("c"));
+    let b = n("b");
+    if [h, s, b, c].iter().all(|v| v.abs() < 1e-6) {
+        return None;
+    }
+    if h.abs() >= 1e-6 {
+        cx.warn("hue shifts of image fills were left out (FigCraft's image filters have none)");
+    }
+    let b = if b.abs() > 1.0 { b / 100.0 } else { b }.clamp(-1.0, 1.0);
+    let contrast = (1.0 + c).clamp(0.0, 2.0);
+    let k = (contrast - 2.0 * b).clamp(1e-6, 2.0);
+    let e = (contrast / k).clamp(0.25, 4.0);
+    let k = (contrast / e).clamp(0.0, 2.0);
+    Some(json!({"saturation": s.clamp(-1.0, 1.0), "contrast": (k - 1.0).clamp(-1.0, 1.0), "exposure": (e.log2() / 2.0).clamp(-1.0, 1.0)}))
 }
 
 /// The image transform of a covering image moved or zoomed in its shape (`scale`, `offsetX`,
@@ -115,13 +141,16 @@ fn gradient(cx: &mut Cx, g: Option<&Value>, w: f64, h: f64) -> Option<Value> {
     let n = |k: &str| g.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v.clamp(-1e6, 1e6));
     let kind = res.and_then(|r| r.get("type")).and_then(Value::as_str).unwrap_or("linear");
     let handles = if kind == "radial" {
-        if g.get("transform").is_some() {
-            cx.warn("the shape of transformed radial gradients was simplified to a circle");
-        }
+        // The circle's centre and two radii, through the gradient's own transform (as SVG's
+        // `gradientTransform`: a stretched, turned or mirrored circle), in the gradient's units.
         let (c, r) = ((n("cx").unwrap_or(0.5), n("cy").unwrap_or(0.5)), n("r").unwrap_or(0.5));
-        let (cx0, cy0) = scale(c.0, c.1);
-        let (rx, ry) = scale(r, r);
-        vec![(cx0, cy0), (cx0 + rx, cy0), (cx0, cy0 + ry)]
+        let t = g.get("transform").and_then(|t| {
+            let k = |key: &str| t.get(key).and_then(Value::as_f64).filter(|v| v.is_finite() && v.abs() <= 1e6);
+            Some([k("a")?, k("b")?, k("c")?, k("d")?, k("tx")?, k("ty")?])
+        });
+        let [a, b, c2, d, e, f] = t.unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let through = |x: f64, y: f64| scale(a * x + c2 * y + e, b * x + d * y + f);
+        vec![through(c.0, c.1), through(c.0 + r, c.1), through(c.0, c.1 + r)]
     } else {
         let a = scale(n("x1").unwrap_or(0.0), n("y1").unwrap_or(0.0));
         let b = scale(n("x2").unwrap_or(1.0), n("y2").unwrap_or(0.0));

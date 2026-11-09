@@ -984,12 +984,15 @@ fn path_data(cx: &mut Cx, s: &Value) -> Option<BezPath> {
     }
 }
 
-/// A polygon's corner `points`, closed (rounded corners are left square).
-fn polygon(cx: &mut Cx, s: &Value) -> Option<BezPath> {
-    if num(s, "uxdesign#cornerRadius").is_some_and(|r| r > 0.0) {
-        cx.warn("rounded polygon corners were imported square");
-    }
+/// A polygon's corner `points`, closed, its corners rounded by `uxdesign#cornerRadius`.
+fn polygon(_cx: &mut Cx, s: &Value) -> Option<BezPath> {
     let pts: Vec<Point> = list(s, "points").iter().take(10_000).filter_map(|p| Some(Point::new(num(p, "x")?, num(p, "y")?))).collect();
+    // Rounded corners: every vertex rounded by the radius (clamped so the arcs fit).
+    if let Some(r) = num(s, "uxdesign#cornerRadius").filter(|r| *r > 0.0)
+        && pts.len() >= 3
+    {
+        return Some(figcraft_doc::geom::rounded_polygon(&pts, r.min(MAX_SIZE)));
+    }
     let (first, rest) = pts.split_first()?;
     let mut path = BezPath::new();
     path.move_to(*first);

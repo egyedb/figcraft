@@ -100,3 +100,19 @@ fn junk_assets_are_skipped() {
     let (doc, _) = import_with(vec![], lib);
     assert!(doc.styles.iter().all(|s| s.id != "X" && s.id != "Z"));
 }
+
+#[test]
+fn runs_naming_different_character_styles_link_each_to_theirs() {
+    let lib = json!({"documentLibrary": {"elements": [char_style("H1", "Heading", None), char_style("BODY", "Body", None)]}});
+    let mut mixed = point_text("Mixed", 0.0, 100.0, "abcd");
+    mixed["meta"]["ux"]["rangedStyles"] = json!([
+        {"length": 2, "linkId": "H1", "fontFamily": "Arial", "fontStyle": "Regular", "postscriptName": "ArialMT", "fontSize": 20},
+        {"length": 2, "linkId": "BODY", "fontFamily": "Arial", "fontStyle": "Bold", "postscriptName": "Arial-BoldMT", "fontSize": 20},
+    ]);
+    let (doc, _) = import_with(vec![mixed], lib);
+    let n = doc.nodes().find(|x| x.name == "Mixed" && matches!(x.kind, figcraft_doc::NodeKind::Text(_))).unwrap();
+    let figcraft_doc::NodeKind::Text(td) = &n.kind else { panic!() };
+    assert!(n.styles.text.is_none());
+    let linked: Vec<(usize, usize, Option<&str>)> = td.runs.iter().map(|r| (r.start, r.end, r.style.style_id.as_deref())).collect();
+    assert_eq!(linked, [(0, 2, Some("H1")), (2, 4, Some("BODY"))]);
+}

@@ -90,7 +90,12 @@ pub(crate) fn node(cx: &mut Cx, l: &Value) -> Option<Laid> {
             m.insert("paragraphSpacing".into(), json!(sp.min(1e4)));
         }
     }
-    runs(cx, l, &characters, &base, &faces, &mut node);
+    // Text set in superscript or subscript throughout takes the font's own figures for it.
+    if let Some(tag) = runs(cx, l, &characters, &base, &faces, &mut node)
+        && let Some(m) = base.as_object_mut()
+    {
+        m.insert("openTypeFlags".into(), json!({tag: 1}));
+    }
     if let Some(id) = super::assets::text_link(cx, l) {
         super::style::link(&mut node, "text", id);
     }
@@ -259,7 +264,17 @@ fn longest_line(s: &str) -> usize {
 }
 
 /// The styled runs (`meta.ux.rangedStyles`) that differ from `base`, as per-character style ids.
-fn runs(cx: &mut Cx, l: &Value, characters: &str, base: &Value, faces: &HashMap<String, (String, String)>, node: &mut JsonMap<String, Value>) {
+/// Runs naming different character styles each link to theirs (`_textStyleId`) when the layer
+/// can't link to one for all. Returns the OpenType feature (`SUPS`, `SUBS`) when the whole text is
+/// in superscript or subscript.
+fn runs(
+    cx: &mut Cx,
+    l: &Value,
+    characters: &str,
+    base: &Value,
+    faces: &HashMap<String, (String, String)>,
+    node: &mut JsonMap<String, Value>,
+) -> Option<&'static str> {
     let ranged =
         l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("rangedStyles")).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     if ranged.len() > MAX_RUNS {
@@ -267,6 +282,9 @@ fn runs(cx: &mut Cx, l: &Value, characters: &str, base: &Value, faces: &HashMap<
     }
     let units = characters.encode_utf16().count();
     let base_fill = node.get("fills").cloned();
+    let per_run_styles = super::assets::text_link(cx, l).is_none();
+    // Units set in superscript, in subscript.
+    let mut scripts = (0usize, 0usize);
     let mut ids = vec![0u64; units];
     let mut table = JsonMap::new();
     let mut start = 0usize;
@@ -278,7 +296,18 @@ fn runs(cx: &mut Cx, l: &Value, characters: &str, base: &Value, faces: &HashMap<
         if end <= start {
             continue;
         }
-        let s = run_style(cx, r, base, faces, base_fill.as_ref());
+        let mut s = run_style(cx, r, base, faces, base_fill.as_ref());
+        match str_field(r, "textScript") {
+            Some("superscript") => scripts.0 += end - start,
+            Some("subscript") => scripts.1 += end - start,
+            _ => {}
+        }
+        if per_run_styles
+            && let Some(id) = str_field(r, "linkId").filter(|i| cx.styles.text.contains(*i))
+            && let Some(m) = s.as_object_mut()
+        {
+            m.insert("_textStyleId".into(), json!(id));
+        }
         if s != *base {
             let id = table.len() as u64 + 1;
             table.insert(id.to_string(), s);
@@ -292,6 +321,17 @@ fn runs(cx: &mut Cx, l: &Value, characters: &str, base: &Value, faces: &HashMap<
         node.insert("characterStyleOverrides".into(), json!(ids));
         node.insert("styleOverrideTable".into(), Value::Object(table));
     }
+    let whole = |n: usize| units > 0 && n == units;
+    if whole(scripts.0) {
+        return Some("SUPS");
+    }
+    if whole(scripts.1) {
+        return Some("SUBS");
+    }
+    if scripts.0 + scripts.1 > 0 {
+        cx.warn("superscript and subscript in part of a text was imported on the baseline (FigCraft sets them for a whole text only)");
+    }
+    None
 }
 
 /// One ranged style as a REST type style over `base` (equal to `base` when it changes nothing).
@@ -330,9 +370,6 @@ fn run_style(cx: &mut Cx, r: &Value, base: &Value, faces: &HashMap<String, (Stri
         }
         Some("none") | None => {}
         Some(other) => cx.warn(format!("the {} text transform is not supported yet", clip(other))),
-    }
-    if matches!(str_field(r, "textScript"), Some(sc) if sc != "none") {
-        cx.warn("superscript and subscript text is not supported yet and was imported on the baseline");
     }
     if let Some(c) = r.get("fill").and_then(style::color) {
         let fill = json!([{"type": "SOLID", "color": c}]);
