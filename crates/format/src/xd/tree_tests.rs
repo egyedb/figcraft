@@ -226,7 +226,8 @@ fn unsupported_features_import_statically_with_notes() {
     for name in ["Cell1", "Cell2", "S1", "S2"] {
         node(&doc, name);
     }
-    assert!(warnings.iter().any(|w| w.contains("repeat grids")), "{warnings:?}");
+    // The repeat grid is a grid now; the others came in too.
+    assert_eq!(node(&doc, "Grid").layout.as_ref().map(|l| l.mode), Some(figcraft_doc::LayoutMode::Grid), "{warnings:?}");
 }
 
 #[test]

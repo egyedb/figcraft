@@ -90,6 +90,10 @@ pub(crate) struct Cx<'a> {
     pub states: HashMap<String, String>,
     /// Each state's component, by state id.
     state_of: HashMap<String, String>,
+    /// How many components or instances the layer being mapped is inside.
+    component_depth: usize,
+    /// Repeat grids met, and those laid out as grids.
+    grids: (usize, usize),
 }
 
 impl Cx<'_> {
@@ -124,7 +128,7 @@ impl Cx<'_> {
     }
 
     /// A node id: the layer's own when it has one not given yet, else a new one.
-    fn id(&mut self, own: Option<&str>) -> String {
+    pub(crate) fn id(&mut self, own: Option<&str>) -> String {
         if let Some(id) = own.filter(|i| !i.is_empty() && i.len() <= 128 && !self.reserved.contains(*i))
             && self.ids.insert(id.to_string())
         {
@@ -171,6 +175,8 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
         flows: Vec::new(),
         states: HashMap::new(),
         state_of: HashMap::new(),
+        component_depth: 0,
+        grids: (0, 0),
     };
     for (id, list) in archive.protos.as_object().into_iter().flatten() {
         cx.protos.insert(id.as_str(), list);
@@ -213,6 +219,10 @@ pub(crate) fn to_rest(archive: &Archive, name: &str, max_nodes: usize, fonts: Fo
     }
     let mut canvases = vec![page];
     let made = made_mains(&mut cx);
+    let (grids, as_grids) = cx.grids;
+    if as_grids < grids {
+        cx.warn(format!("{} of {grids} repeat grids kept their cells at fixed places (their cells didn't make a whole grid)", grids - as_grids));
+    }
     let (stacks, laid_out) = cx.stacks;
     if laid_out < stacks {
         cx.warn(format!(
@@ -450,7 +460,7 @@ fn union(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
 }
 
 /// Move built nodes by `-dx`, `-dy` in their parent's space (their parent moved by that much).
-fn shift(built: Vec<Built>, dx: f64, dy: f64) -> Vec<Built> {
+pub(crate) fn shift(built: Vec<Built>, dx: f64, dy: f64) -> Vec<Built> {
     built
         .into_iter()
         .map(|mut b| {
@@ -598,9 +608,6 @@ fn weight(l: &Value) -> usize {
 fn unsupported(cx: &mut Cx, l: &Value) {
     let Some(ux) = l.get("meta").and_then(|m| m.get("ux")) else { return };
     let has = |k: &str| ux.get(k).is_some_and(|v| !v.is_null());
-    if has("repeatGrid") {
-        cx.warn("repeat grids are not supported yet: they were imported as plain groups of their cells");
-    }
     if has("scrollingType") || ux.get("fixed").and_then(Value::as_bool) == Some(true) {
         cx.warn("scroll groups and fixed-position layers are not supported yet: they were imported as plain layers");
     }
@@ -668,6 +675,11 @@ fn clipped_text(
 #[allow(clippy::too_many_arguments)]
 fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, root: bool, ty: &str, main: Option<String>) -> Option<Built> {
     let mut built = Vec::new();
+    // Inside a component or instance, layers can't become components of their own.
+    let inside = matches!(ty, "COMPONENT" | "INSTANCE");
+    if inside {
+        cx.component_depth += 1;
+    }
     let clip_path = l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("clipPathResources"));
     if let Some(cp) = clip_path {
         for m in children(cx, list(cp, "children"), world, world, depth + 1, false) {
@@ -678,9 +690,32 @@ fn group(cx: &mut Cx, l: &Value, world: Affine, origin: Affine, depth: usize, ro
     // The layers with their place in the group (a stack's background is its first).
     let mut own: Vec<(usize, Built)> =
         kids(l).iter().enumerate().filter_map(|(i, k)| layer(cx, k, world, world, depth + 1, false).map(|b| (i, b))).collect();
-    // A stack or padded group: auto layout when that keeps every layer where XD put it.
+    if inside {
+        cx.component_depth -= 1;
+    }
     let mut auto = None;
-    if let Some(mut ask) = super::stack::ask(l) {
+    // A repeat grid: grid auto layout of its cells.
+    if let Some(g) = super::grid::ask(l) {
+        cx.grids.0 += 1;
+        if !masked {
+            let name = str_field(l, "name").unwrap_or("");
+            let components = cx.component_depth == 0 && !inside;
+            match super::grid::layout(cx, &g, std::mem::take(&mut own), kids(l), world, name, components) {
+                Ok((props, cells)) => {
+                    own = cells;
+                    auto = Some(props);
+                    cx.grids.1 += 1;
+                }
+                Err(cells) => own = cells,
+            }
+        }
+    } else if l.get("meta").and_then(|m| m.get("ux")).and_then(|u| u.get("repeatGrid")).is_some() {
+        cx.grids.0 += 1;
+    }
+    // A stack or padded group: auto layout when that keeps every layer where XD put it.
+    if auto.is_none()
+        && let Some(mut ask) = super::stack::ask(l)
+    {
         cx.stacks.0 += 1;
         // A reference's gap is its definition's.
         ask.gaps = kids(l)

@@ -11,9 +11,8 @@
 //! REST API file JSON shape and the REST importer builds the document, so this import shares its
 //! mapping, budgets and import report with the `.fig`, `.sketch` and file JSON imports.
 //!
-//! Artboards, groups, shapes, paths, text, images, transforms, masks, components, stacks, document
-//! styles and prototype links are mapped. Repeat grids and states come in as the static layers the
-//! file shows, with a warning naming each. Anything not understood is skipped with a warning;
+//! Artboards, groups, shapes, paths, text, images, transforms, masks, components and their states,
+//! stacks, repeat grids, document styles and prototype links are mapped. Anything not understood is skipped with a warning;
 //! malformed input never panics.
 
 mod assets;
@@ -21,6 +20,9 @@ mod assets;
 mod assets_tests;
 #[cfg(test)]
 mod fixture;
+mod grid;
+#[cfg(test)]
+mod grid_tests;
 mod proto;
 #[cfg(test)]
 mod proto_tests;
