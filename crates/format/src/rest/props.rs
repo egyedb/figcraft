@@ -652,6 +652,26 @@ pub(super) fn layout_grids(v: &Value) -> Vec<LayoutGrid> {
         .collect()
 }
 
+/// Most guides read from one frame.
+const MAX_GUIDES: usize = 1000;
+
+/// A frame's guides (`guides`: `{axis: "X" | "Y", offset}`, as the Plugin API has them; the REST
+/// API leaves them out, the `.xd` import gives them): `X` guides are vertical, at an x offset.
+pub(super) fn guides(v: &Value) -> Vec<figcraft_doc::Guide> {
+    list(v, "guides")
+        .iter()
+        .take(MAX_GUIDES)
+        .filter_map(|g| {
+            let vertical = match text(g, "axis")? {
+                "X" => true,
+                "Y" => false,
+                _ => return None,
+            };
+            Some(figcraft_doc::Guide { vertical, offset: num(g, "offset")?.clamp(-MAX_COORD, MAX_COORD) })
+        })
+        .collect()
+}
+
 pub(super) fn export_settings(v: &Value) -> Vec<ExportSetting> {
     list(v, "exportSettings")
         .iter()

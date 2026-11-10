@@ -797,3 +797,13 @@ fn an_arc_without_an_end_is_whole_wherever_it_starts() {
         assert_eq!(sweep, std::f64::consts::TAU, "start {start}");
     }
 }
+
+#[test]
+fn frame_guides_are_read() {
+    let (doc, _) = one(json!([{"id": "1:1", "name": "Board", "type": "FRAME", "relativeTransform": at(0.0, 0.0), "size": {"x": 400, "y": 300},
+        "guides": [{"axis": "X", "offset": 200}, {"axis": "Y", "offset": 50.5}, {"axis": "Z", "offset": 1}, {"axis": "X"}, 7]}]));
+    let g = &named(&doc, "Board").guides;
+    assert_eq!(g.len(), 2);
+    assert!(g[0].vertical && close(g[0].offset, 200.0));
+    assert!(!g[1].vertical && close(g[1].offset, 50.5));
+}

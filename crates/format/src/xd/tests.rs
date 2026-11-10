@@ -138,3 +138,27 @@ fn deep_nesting_is_cut_with_a_warning() {
     let (_, warnings) = import(&z, "f").unwrap();
     assert!(warnings.iter().any(|w| w.contains("nested deeper") || w.contains("recursion limit")), "{warnings:?}");
 }
+
+#[test]
+fn artboard_guides_and_hidden_layout_grids_come_along() {
+    let z = xd_zip(&[board("Desk", (500.0, 0.0, 1400.0, 900.0), vec![])], vec![], vec![], &[]);
+    // The artboard's guides and grid settings, as XD keeps them on the artboard layer.
+    let content = json!({"version": "1.5.0", "children": [{"type": "artboard", "id": "Desk",
+        "meta": {"ux": {
+            "guidesModel": {"verticalGuides": {"guides": [{"position": 700, "guid": "a"}]}, "horizontalGuides": {"guides": [{"position": 120, "guid": "b"}]}},
+            "gridStyle": {"columns": 12, "gutter": 16, "marginLeft": 138, "marginRight": 138, "columnSpacing": 8, "rowSpacing": 8}}},
+        "style": {"fill": rgb(255, 255, 255)}, "artboard": {"children": []}}]});
+    let z = with_member(&z, "artwork/artboard-Desk/graphics/graphicContent.agc", content.to_string().as_bytes());
+    let (doc, warnings) = import(&z, "f").unwrap();
+    let desk = find(&doc, "Desk");
+    let guides: Vec<(bool, f64)> = desk.guides.iter().map(|g| (g.vertical, g.offset)).collect();
+    assert_eq!(guides, [(true, 700.0), (false, 120.0)], "{warnings:?}");
+    // The layout grid's columns and the square grid, hidden: the file doesn't say they showed.
+    assert_eq!(desk.grids.len(), 2);
+    let cols = &desk.grids[0];
+    assert_eq!(
+        (cols.kind, cols.count, cols.gutter, cols.offset, cols.align, cols.visible),
+        (figcraft_doc::GridKind::Columns, 12, 16.0, 138.0, figcraft_doc::GridAlign::Stretch, false)
+    );
+    assert_eq!((desk.grids[1].kind, desk.grids[1].size, desk.grids[1].visible), (figcraft_doc::GridKind::Grid, 8.0, false));
+}

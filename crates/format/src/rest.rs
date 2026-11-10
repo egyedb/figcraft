@@ -751,6 +751,7 @@ impl<'a> Ctx<'a> {
             }
             n.layout = props::auto_layout(j, self.fig_sources.is_some());
             n.grids = props::layout_grids(j);
+            n.guides = props::guides(j);
         }
         n.child_layout = props::child_layout(j, n.layout.as_ref().map(|l| l.mode), parent_mode);
         n.exports = props::export_settings(j);

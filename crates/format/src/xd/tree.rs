@@ -370,6 +370,46 @@ fn made_mains(cx: &mut Cx) -> Vec<Value> {
     out
 }
 
+/// An artboard's guides (`guidesModel`: vertical and horizontal guides at a `position` on the
+/// artboard) as REST guides.
+fn guides(g: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (key, axis) in [("verticalGuides", "X"), ("horizontalGuides", "Y")] {
+        let list = g.get(key).and_then(|v| v.get("guides")).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        for guide in list.iter().take(1000) {
+            if let Some(p) = num(guide, "position") {
+                out.push(json!({"axis": axis, "offset": p}));
+            }
+        }
+    }
+    out
+}
+
+/// An artboard's layout grid and square grid (`gridStyle`: `columns`, `gutter`, the left and right
+/// margins; the square grid's `columnSpacing`) as REST layout grids, hidden: the file doesn't say
+/// whether they were showing. `w`: the artboard's width.
+fn layout_grids(g: &Value, w: f64) -> Vec<Value> {
+    let mut out = Vec::new();
+    let n = |k: &str| num(g, k).filter(|v| *v >= 0.0);
+    if let Some(columns) = n("columns").filter(|c| *c >= 1.0) {
+        let (left, right) = (n("marginLeft").unwrap_or(0.0), n("marginRight").unwrap_or(0.0));
+        let gutter = n("gutter").unwrap_or(0.0);
+        // Equal margins stretch the columns between them; others start at the left margin, the
+        // columns as wide as fit.
+        let grid = if (left - right).abs() < 0.5 {
+            json!({"pattern": "COLUMNS", "alignment": "STRETCH", "count": columns.min(1000.0), "gutterSize": gutter, "offset": left, "visible": false})
+        } else {
+            let size = ((w - left - right - gutter * (columns - 1.0)) / columns).max(1.0);
+            json!({"pattern": "COLUMNS", "alignment": "MIN", "count": columns.min(1000.0), "sectionSize": size, "gutterSize": gutter, "offset": left, "visible": false})
+        };
+        out.push(grid);
+    }
+    if let Some(size) = n("columnSpacing").filter(|s| *s > 0.0) {
+        out.push(json!({"pattern": "GRID", "sectionSize": size.min(MAX_SIZE), "visible": false}));
+    }
+    out
+}
+
 /// The prototype screen size: `home`'s when it scrolls, else the one most scrolling artboards have.
 fn screen(screens: &[(String, (f64, f64))], home: Option<&str>) -> Option<(f64, f64)> {
     if let Some((_, s)) = screens.iter().find(|(id, _)| Some(id.as_str()) == home) {
@@ -467,6 +507,15 @@ fn artboard(cx: &mut Cx, ab: &super::Artboard) -> Option<JsonMap<String, Value>>
     node.insert("fills".into(), Value::Array(fills));
     unsupported(cx, root);
     node.insert("children".into(), Value::Array(built.into_iter().map(|b| Value::Object(b.node)).collect()));
+    let ux = root.get("meta").and_then(|m| m.get("ux"));
+    let guides = ux.and_then(|u| u.get("guidesModel")).map(guides).unwrap_or_default();
+    if !guides.is_empty() {
+        node.insert("guides".into(), Value::Array(guides));
+    }
+    let grids = ux.and_then(|u| u.get("gridStyle")).map(|g| layout_grids(g, w)).unwrap_or_default();
+    if !grids.is_empty() {
+        node.insert("layoutGrids".into(), Value::Array(grids));
+    }
     // Taller than its viewport: it scrolls up and down in a prototype.
     if let Some(v) = ab.viewport.filter(|v| *v + 0.5 < h) {
         node.insert("overflowDirection".into(), json!("VERTICAL_SCROLLING"));
