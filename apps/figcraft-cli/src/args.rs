@@ -13,7 +13,7 @@ use figcraft_doc::{PrintSettings, VdCompat};
 /// FigCraft without a window
 ///
 /// Files: .figcraft (native), .penpot (Penpot 2.x), .json (FigCraft or REST API file JSON), .fig
-/// (best effort; `info` lists what wasn't imported), .sketch (Sketch 48 or newer, best effort), .xd (Adobe XD, best effort),
+/// (best effort; `info` lists what wasn't imported), .sketch (Sketch 48 or newer, best effort), .xd (Adobe XD, best effort), .psd/.psb (Photoshop, best effort),
 /// .svg, .png/.jpg/.webp/.gif/.bmp (open as an image layer).
 #[derive(Parser)]
 #[command(name = "figcraft-cli", bin_name = "figcraft-cli", version, arg_required_else_help = true, after_help = "See docs/cli.md and docs/mcp.md.")]

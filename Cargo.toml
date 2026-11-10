@@ -32,6 +32,7 @@ figcraft-ui-egui = { path = "crates/ui-egui" }
 figcraft-mcp = { path = "crates/mcp" }
 figcraft-collab-net = { path = "crates/collab-net" }
 figcraft-plugin = { path = "crates/plugin" }
+figcraft-psd = { path = "crates/psd" }
 
 # Keep coupled craft-libs crates on one rev. craft-update has no sibling-crate
 # dependencies and is pinned separately for the suite updater rollout.
@@ -96,6 +97,7 @@ linesweeper = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # `.fig` import: raw deflate chunks (already built for zip) and zstd chunks (pure Rust, MIT, wasm-safe).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 sha1 = "0.11"
 sha2 = "0.10"

@@ -1,0 +1,29 @@
+[package]
+name = "figcraft-psd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Adobe Photoshop PSD/PSB reader, taken from PhotoCraft's photocraft-psd (see README.md)"
+
+[lib]
+name = "figcraft_psd"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+testgen = []
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = { workspace = true }
+flate2 = { workspace = true }
+encoding_rs = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+figcraft-psd = { path = ".", features = ["testgen"] }

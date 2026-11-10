@@ -140,6 +140,9 @@ fn load_any(
             if let Some(r) = load_xd(bytes, &file_stem(name_hint)) {
                 return Ok((r?, true));
             }
+            if let Some(r) = load_psd(bytes, name_hint) {
+                return Ok((r?, true));
+            }
             if let Some(r) = figcraft_format::rest::try_import_with(bytes, variables, images) {
                 let (mut doc, warnings) = r.map_err(|e| EngineError::Other(e.to_string()))?;
                 link_instances(&mut doc);
@@ -197,6 +200,93 @@ fn load_xd(bytes: &[u8], name: &str) -> Option<Result<figcraft_format::Loaded>> 
         link_instances(&mut doc);
         figcraft_format::Loaded { issues: warnings, ..doc.into() }
     }))
+}
+
+/// Gives `None` when `bytes` are not a Photoshop file. Then other readers can try. Files its
+/// smart objects link to are looked for next to `path` (the PSD's own path, when it has one).
+fn load_psd(bytes: &[u8], path: &str) -> Option<Result<figcraft_format::Loaded>> {
+    if !figcraft_format::psd::is_psd(bytes) {
+        return None;
+    }
+    figcraft_text::fontdb::scan_system_fonts();
+    let options = figcraft_format::psd::Options {
+        fonts: figcraft_format::xd::Fonts {
+            face: Some(Box::new(figcraft_text::fontdb::postscript_face)),
+            metrics: Some(Box::new(|family: &str, style: &str| {
+                let f = figcraft_text::fontdb::has_family(family).then(|| figcraft_text::fontdb::find_face(family, style)).flatten()?;
+                (f.upem > 0.0).then(|| (f.ascent / f.upem, f.descent / f.upem))
+            })),
+        },
+        linked: linked_files(path),
+        preview: true,
+    };
+    let r = figcraft_format::psd::try_import_with(bytes, &file_stem(path), options)?;
+    Some(r.map_err(|e| EngineError::Other(e.to_string())).map(|(mut doc, warnings)| {
+        match_font_families(&mut doc);
+        fit_point_texts(&mut doc);
+        link_instances(&mut doc);
+        figcraft_format::Loaded { issues: warnings, ..doc.into() }
+    }))
+}
+
+/// Finds a file a Photoshop smart object links to: at its relative path from the PSD's folder,
+/// by its name in that folder or a few levels below it, or at the full path it was saved with.
+#[cfg(not(target_arch = "wasm32"))]
+fn linked_files(path: &str) -> Option<figcraft_format::psd::LinkedLookup> {
+    let dir = std::path::Path::new(path).parent()?.to_path_buf();
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+    Some(Box::new(move |r: &figcraft_format::psd::LinkedRef| {
+        let read = |p: &std::path::Path| {
+            let file = crate::file_access::metadata(p).is_ok_and(|m| m.is_file());
+            file.then(|| read_capped(&p.to_string_lossy(), MAX_DOCUMENT_FILE).ok()).flatten()
+        };
+        let safe = |s: &str| !s.is_empty() && !s.contains('\0');
+        if let Some(rel) = r.rel_path.as_deref().filter(|s| safe(s))
+            && let Some(b) = read(&dir.join(rel))
+        {
+            return Some(b);
+        }
+        let name = std::path::Path::new(&r.name).file_name()?.to_owned();
+        if let Some(b) = read(&dir.join(&name)) {
+            return Some(b);
+        }
+        if let Some(found) = find_named(&dir, &name, 3) {
+            return read(&found);
+        }
+        let full = r.full_path.as_deref().filter(|s| safe(s))?;
+        let full = full.strip_prefix("file://").unwrap_or(full);
+        read(std::path::Path::new(full))
+    }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn linked_files(_path: &str) -> Option<figcraft_format::psd::LinkedLookup> {
+    None
+}
+
+/// The first file called `name` in `dir` or up to `depth` folders below it (a bounded search).
+#[cfg(not(target_arch = "wasm32"))]
+fn find_named(dir: &std::path::Path, name: &std::ffi::OsStr, depth: usize) -> Option<std::path::PathBuf> {
+    let mut queue = std::collections::VecDeque::from([(dir.to_path_buf(), 0usize)]);
+    let mut seen = 0usize;
+    while let Some((d, level)) = queue.pop_front() {
+        let Ok(entries) = crate::file_access::read_dir(&d) else { continue };
+        for p in entries.into_iter().take(5_000) {
+            seen += 1;
+            if seen > 50_000 {
+                return None;
+            }
+            if p.file_name() == Some(name) && crate::file_access::metadata(&p).is_ok_and(|m| m.is_file()) {
+                return Some(p);
+            }
+            if level < depth && crate::file_access::is_dir(&p) {
+                queue.push_back((p, level + 1));
+            }
+        }
+    }
+    None
 }
 
 /// Texts that grow with their content (XD's point texts) take the width FigCraft measures,

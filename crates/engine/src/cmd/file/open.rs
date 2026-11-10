@@ -184,7 +184,7 @@ pub(super) fn import(s: &mut Session, p: &Value) -> Result<Value> {
             }
             Ok(out)
         }
-        "figcraft" | "json" | "fig" | "jam" | "sketch" | "xd" | "penpot" => {
+        "figcraft" | "json" | "fig" | "jam" | "sketch" | "xd" | "psd" | "psb" | "penpot" => {
             let resolver = path.as_deref().map(rest_images);
             let images: figcraft_format::rest::ImageResolver = match &resolver {
                 Some(r) => r,

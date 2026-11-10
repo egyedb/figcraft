@@ -21,6 +21,7 @@ pub mod fig;
 pub mod jpeg;
 pub mod library;
 pub mod penpot;
+pub mod psd;
 pub mod rest;
 pub mod sketch;
 pub mod thumbnail;
