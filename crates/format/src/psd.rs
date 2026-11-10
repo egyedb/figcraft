@@ -13,13 +13,17 @@
 //!   becomes the component's own layers, an embedded image its picture, anything else (a vector
 //!   smart object, a missing link) the pixels Photoshop rendered for it;
 //! * drop and inner shadows, outer and inner glows, colour overlays and strokes become effects,
-//!   fills and strokes; layer and vector masks become mask layers; clipping masks become masked
-//!   groups; ruler guides become guides.
+//!   fills and strokes; gradient overlays and gradient fill layers become gradient fills, pattern
+//!   overlays and pattern fill layers tiled image fills of the file's pattern (painted into the
+//!   pixels of pixel layers); layer and vector masks become mask layers; clipping masks become
+//!   masked groups; ruler guides become guides.
 //!
-//! Adjustment layers, warped type, 3D and video layers, and effects FigCraft can't draw are left
-//! out or approximated, each with a note. Malformed input never panics.
+//! Adjustment layers, warped type, 3D and video layers, noise gradients, bevels, satin, and
+//! effects FigCraft can't draw are left out or approximated, each with a note. Malformed input
+//! never panics.
 
 mod effects;
+mod fills;
 mod layers;
 mod shape;
 mod smart;
@@ -136,6 +140,10 @@ pub(crate) struct Shared {
     pub counts: BTreeMap<&'static str, usize>,
     /// The next id given to a file being mapped (keys the image cache).
     pub next_file: usize,
+    /// Decoded pattern tiles, by file id and pattern id.
+    pub tiles: HashMap<(usize, String), Option<Rc<fills::Tile>>>,
+    /// The files whose patterns were read.
+    pub tiles_read: std::collections::HashSet<usize>,
     /// Each mapped file's parsed `Txt2`, by its id.
     pub txt2_cache: HashMap<usize, Rc<Option<figcraft_psd::engine_data::Value>>>,
 }
@@ -166,6 +174,8 @@ impl Shared {
             counts: BTreeMap::new(),
             next_file: 0,
             txt2_cache: HashMap::new(),
+            tiles: HashMap::new(),
+            tiles_read: std::collections::HashSet::new(),
         }
     }
 

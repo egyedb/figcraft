@@ -267,3 +267,221 @@ fn damaged_files_never_crash() {
         let _ = import_with(&flipped, "Flipped", Options::default());
     }
 }
+
+/// A two-stop gradient descriptor (red to blue), as overlays and fill layers store it.
+fn red_to_blue(class: &str, angle: f64) -> Descriptor {
+    let stop = |c: D, at: i32| {
+        D::Descriptor(
+            Descriptor::new("Clrt")
+                .with("Clr ", c)
+                .with("Type", D::Enumerated { type_id: Id::new("Clry"), value: Id::new("UsrS") })
+                .with("Lctn", D::Integer(at))
+                .with("Mdpn", D::Integer(50)),
+        )
+    };
+    let opaque = |at: i32| {
+        D::Descriptor(
+            Descriptor::new("TrnS")
+                .with("Opct", D::UnitFloat { unit: *b"#Prc", value: 100.0 })
+                .with("Lctn", D::Integer(at))
+                .with("Mdpn", D::Integer(50)),
+        )
+    };
+    let grad = Descriptor::new("Grdn")
+        .with("GrdF", D::Enumerated { type_id: Id::new("GrdF"), value: Id::new("CstS") })
+        .with("Clrs", D::List(vec![stop(rgb(255.0, 0.0, 0.0), 0), stop(rgb(0.0, 0.0, 255.0), 4096)]))
+        .with("Trns", D::List(vec![opaque(0), opaque(4096)]));
+    Descriptor::new(class)
+        .with("enab", D::Boolean(true))
+        .with("Opct", D::UnitFloat { unit: *b"#Prc", value: 100.0 })
+        .with("Grad", D::Descriptor(grad))
+        .with("Angl", D::UnitFloat { unit: *b"#Ang", value: angle })
+        .with("Type", D::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
+        .with("Algn", D::Boolean(true))
+        .with("Scl ", D::UnitFloat { unit: *b"#Prc", value: 100.0 })
+}
+
+/// A layer style block holding `effects` (key, descriptor).
+fn style(effects: Vec<(&str, Descriptor)>) -> TaggedBlock {
+    let mut fx = Descriptor::new("null").with("Scl ", D::UnitFloat { unit: *b"#Prc", value: 100.0 }).with("masterFXSwitch", D::Boolean(true));
+    for (k, d) in effects {
+        fx = fx.with(k, D::Descriptor(d));
+    }
+    let mut data = 0u32.to_be_bytes().to_vec();
+    data.extend(versioned(fx));
+    TaggedBlock::new(*b"lfx2", data)
+}
+
+fn gradient_of(n: &Node) -> figcraft_doc::color::Gradient {
+    n.fills
+        .iter()
+        .find_map(|p| match &p.kind {
+            figcraft_doc::color::PaintKind::Gradient(g) => Some(g.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no gradient in {:?}", n.fills))
+}
+
+#[test]
+fn gradient_overlays_on_shapes_become_gradient_fills_over_the_shape_colour() {
+    let mut shape = rounded_rect_layer("Button", 20.0, 30.0, 120.0, 70.0, 200.0, 100.0);
+    shape.extra_blocks.push(style(vec![("GrFl", red_to_blue("GrFl", 0.0))]));
+    let mut b = base(200, 100);
+    b.push_layer(shape);
+    let (doc, _) = import(&b.to_bytes().unwrap());
+    let n = named(&doc, "Button");
+    assert!(format!("{:?}", n.fills.first()).contains("Solid"), "the shape's own colour stays below: {:?}", n.fills);
+    let g = gradient_of(n);
+    // Angle 0: left to right across the layer's bounds.
+    assert!(g.from.0 < 0.01 && g.to.0 > 0.99, "{g:?}");
+    assert!((g.from.1 - 0.5).abs() < 0.01 && (g.to.1 - 0.5).abs() < 0.01, "{g:?}");
+    assert_eq!(g.stops.len(), 3, "both stops and their midpoint: {:?}", g.stops);
+}
+
+#[test]
+fn gradient_fill_layers_become_rectangles_with_a_gradient() {
+    let mut spec = LayerSpec::new("Sky", 0, 0, 1, 1, solid(1, 1, [0, 0, 0, 0]));
+    spec.extra_blocks = vec![TaggedBlock::new(*b"GdFl", versioned(red_to_blue("null", 90.0)))];
+    let mut b = base(100, 60);
+    b.push_layer(spec);
+    let (doc, _) = import(&b.to_bytes().unwrap());
+    let n = named(&doc, "Sky");
+    assert!(matches!(n.kind, NodeKind::Rectangle));
+    assert_eq!((n.width, n.height), (100.0, 60.0));
+    // Angle 90: bottom to top.
+    let g = gradient_of(n);
+    assert!(g.from.1 > 0.99 && g.to.1 < 0.01, "{g:?}");
+}
+
+#[test]
+fn gradient_overlays_on_pixel_layers_are_painted_into_the_pixels() {
+    let mut spec = LayerSpec::new("Bar", 0, 0, 40, 4, solid(40, 4, [255, 255, 255, 255]));
+    spec.extra_blocks = vec![style(vec![("GrFl", red_to_blue("GrFl", 0.0))])];
+    let mut b = base(40, 4);
+    b.push_layer(spec);
+    let (doc, _) = import(&b.to_bytes().unwrap());
+    let n = named(&doc, "Bar");
+    let key = n
+        .fills
+        .iter()
+        .find_map(|p| match &p.kind {
+            figcraft_doc::color::PaintKind::Image(i) => Some(i.image.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let img = image::load_from_memory(&doc.images[&key].bytes).unwrap().to_rgba8();
+    let (left, right) = (img.get_pixel(0, 2), img.get_pixel(39, 2));
+    assert!(left[0] > 200 && left[2] < 60, "red on the left: {left:?}");
+    assert!(right[2] > 200 && right[0] < 60, "blue on the right: {right:?}");
+}
+
+#[test]
+fn pattern_overlays_become_tiled_image_fills() {
+    let tile = figcraft_psd::patterns::PsdPattern {
+        mode: 3,
+        width: 2,
+        height: 2,
+        name: "Checks".into(),
+        id: "11111111-2222-3333-4444-555555555555".into(),
+        palette: None,
+        depth: 8,
+        channels: vec![vec![255, 0, 0, 255], vec![255, 0, 0, 255], vec![255, 0, 0, 255]],
+        alpha: None,
+    };
+    let fill = Descriptor::new("patternFill")
+        .with("enab", D::Boolean(true))
+        .with("Opct", D::UnitFloat { unit: *b"#Prc", value: 50.0 })
+        .with(
+            "Ptrn",
+            D::Descriptor(
+                Descriptor::new("Ptrn").with("Nm  ", D::Text(UnicodeString::new("Checks"))).with("Idnt", D::Text(UnicodeString::new(&tile.id))),
+            ),
+        )
+        .with("Scl ", D::UnitFloat { unit: *b"#Prc", value: 200.0 })
+        .with("Algn", D::Boolean(true));
+    let mut shape = rounded_rect_layer("Card", 10.0, 10.0, 60.0, 50.0, 100.0, 80.0);
+    shape.extra_blocks.push(style(vec![("patternFill", fill)]));
+    let mut b = base(100, 80);
+    b.push_layer(shape);
+    let mut file = b.build().unwrap();
+    file.global_blocks.push(TaggedBlock::new(*b"Patt", figcraft_psd::patterns::write_pattern_block(&[tile]).unwrap()));
+    let (doc, notes) = import(&file.to_bytes().unwrap());
+    let n = named(&doc, "Card");
+    let img = n
+        .fills
+        .iter()
+        .find_map(|p| match &p.kind {
+            figcraft_doc::color::PaintKind::Image(i) => Some((i.clone(), p.opacity)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no pattern fill in {:?} ({notes:?})", n.fills));
+    assert_eq!(img.0.scale_mode, figcraft_doc::color::ImageScaleMode::Tile);
+    assert!((img.0.scale - 2.0).abs() < 1e-9);
+    assert!((img.1 - 0.5).abs() < 1e-6);
+    assert_eq!((doc.images[&img.0.image].width, doc.images[&img.0.image].height), (2, 2));
+}
+
+/// A pixel layer with a raster mask and a vector mask: the raster mask is baked into its pixels
+/// and the vector mask masks it in a group.
+#[test]
+fn vector_masks_on_pixel_layers_mask_them_in_a_group() {
+    let k = |x: f64, y: f64| PsdKnot { linked: false, pre: (x, y), anchor: (x, y), post: (x, y) };
+    let path =
+        PathData::from_subpaths(&[PsdSubpath { closed: true, operation: 1, knots: vec![k(0.1, 0.1), k(0.5, 0.1), k(0.5, 0.5), k(0.1, 0.5)] }], false);
+    let mut spec = LayerSpec::new("Photo", 0, 0, 100, 100, solid(100, 100, [9, 99, 199, 255]));
+    spec.extra_blocks = vec![TaggedBlock::new(*b"vmsk", VectorMaskBlock { version: 3, flags: 0, path }.to_bytes())];
+    spec.mask =
+        Some(figcraft_psd::MaskSpec { rect: figcraft_psd::Rect::from_xywh(0, 0, 50, 50), data: vec![255; 2500], default_color: 0, disabled: false });
+    let mut b = base(100, 100);
+    b.push_layer(spec);
+    let (doc, _) = import(&b.to_bytes().unwrap());
+    let photo = doc.nodes().find(|n| n.name == "Photo" && matches!(n.kind, NodeKind::Rectangle)).unwrap();
+    // The pixels are baked with their raster mask; the vector mask masks them in a group.
+    let g = photo.parent.and_then(|p| doc.node(p)).unwrap();
+    let masks = g.children.iter().filter_map(|c| doc.node(*c)).filter(|n| n.is_mask).count();
+    assert_eq!(masks, 1, "one mask per group");
+}
+
+/// A placed Photoshop file without layers (saved flattened) gives its component its picture.
+#[test]
+fn flattened_placed_files_give_their_component_its_picture() {
+    let mut inner = PsdBuilder::new(4, 2);
+    inner.composite(solid(4, 2, [0, 200, 0, 255]));
+    let inner = inner.to_bytes().unwrap();
+    let uuid = "7f0c1d2e-0000-4000-8000-000000000002";
+    let mut item = b"liFD".to_vec();
+    item.extend_from_slice(&7u32.to_be_bytes());
+    item.push(uuid.len() as u8);
+    item.extend_from_slice(uuid.as_bytes());
+    let name: Vec<u16> = "flat.psb".encode_utf16().collect();
+    item.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    item.extend(name.iter().flat_map(|u| u.to_be_bytes()));
+    item.extend_from_slice(b"8BPB\0\0\0\0");
+    item.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+    item.push(0);
+    item.extend_from_slice(&inner);
+    let mut lnk2 = (item.len() as u64).to_be_bytes().to_vec();
+    lnk2.extend_from_slice(&item);
+    while !lnk2.len().is_multiple_of(4) {
+        lnk2.push(0);
+    }
+    let corners = [10.0, 10.0, 14.0, 10.0, 14.0, 12.0, 10.0, 12.0];
+    let d = Descriptor::new("null")
+        .with("Idnt", D::Text(UnicodeString::new(uuid)))
+        .with("Trnf", D::List(corners.iter().map(|v| D::Double(*v)).collect()))
+        .with("Sz  ", D::Descriptor(Descriptor::new("Pnt ").with("Wdth", D::Double(4.0)).with("Hght", D::Double(2.0))));
+    let mut sold = b"soLD".to_vec();
+    sold.extend_from_slice(&4u32.to_be_bytes());
+    sold.extend(versioned(d));
+    let mut spec = LayerSpec::new("Flat", 10, 10, 4, 2, solid(4, 2, [0, 200, 0, 255]));
+    spec.extra_blocks = vec![TaggedBlock::new(*b"SoLd", sold)];
+    let mut b = base(40, 40);
+    b.push_layer(spec);
+    let mut file = b.build().unwrap();
+    file.global_blocks.push(TaggedBlock::new(*b"lnk2", lnk2));
+    let (doc, _) = import(&file.to_bytes().unwrap());
+    let main = doc.nodes().find(|n| matches!(n.kind, NodeKind::Component { .. })).unwrap();
+    assert_eq!(main.name, "flat.psb");
+    let child = main.children.first().and_then(|c| doc.node(*c)).expect("the component holds the file's picture");
+    assert!(child.fills.iter().any(|p| format!("{p:?}").contains("Image")), "{:?}", child.fills);
+}

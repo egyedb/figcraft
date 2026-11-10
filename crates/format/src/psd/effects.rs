@@ -27,6 +27,10 @@ pub(crate) struct Fx {
     /// A colour overlay: colour and opacity.
     pub overlay: Option<([f64; 3], f64)>,
     pub stroke: Option<Stroke>,
+    /// A gradient overlay.
+    pub gradient: Option<super::fills::Grad>,
+    /// A pattern overlay.
+    pub pattern: Option<super::fills::Pattern>,
 }
 
 /// The layer style of `rec`.
@@ -45,10 +49,10 @@ pub(crate) fn parse(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord) -> Fx {
         ("IrGl", "", Kind::InnerGlow),
         ("SoFi", "solidFillMulti", Kind::Overlay),
         ("FrFX", "frameFXMulti", Kind::Stroke),
-        ("GrFl", "gradientFillMulti", Kind::Unsupported("gradient overlays")),
+        ("GrFl", "gradientFillMulti", Kind::Gradient),
         ("ebbl", "", Kind::Unsupported("bevels and embosses")),
         ("ChFX", "", Kind::Unsupported("satin effects")),
-        ("patternFill", "", Kind::Unsupported("pattern overlays")),
+        ("patternFill", "", Kind::Pattern),
     ] {
         let mut all: Vec<&Descriptor> = desc(&d, single).into_iter().collect();
         all.extend(util::list(&d, multi).iter().filter_map(|v| match v {
@@ -74,6 +78,8 @@ enum Kind {
     InnerGlow,
     Overlay,
     Stroke,
+    Gradient,
+    Pattern,
     Unsupported(&'static str),
 }
 
@@ -135,11 +141,19 @@ fn effect(sh: &mut Shared, fx: &FileCx, e: &Descriptor, kind: Kind, scale: f64, 
                 None => sh.note("gradient and pattern strokes in layer styles were left out"),
             }
         }
+        Kind::Gradient => match super::fills::gradient(e, opacity) {
+            Some(g) if out.gradient.is_none() => out.gradient = Some(g),
+            Some(_) => sh.note("extra gradient overlays were left out"),
+            None => sh.note("noise gradient overlays were left out"),
+        },
+        Kind::Pattern => match super::fills::pattern(e, opacity) {
+            Some(p) if out.pattern.is_none() => out.pattern = Some(p),
+            Some(_) => sh.note("extra pattern overlays were left out"),
+            None => sh.note("pattern overlays without a pattern were left out"),
+        },
         Kind::Unsupported(what) => sh.note(match what {
-            "gradient overlays" => "gradient overlays were left out",
             "bevels and embosses" => "bevels and embosses were left out",
-            "satin effects" => "satin effects were left out",
-            _ => "pattern overlays were left out",
+            _ => "satin effects were left out",
         }),
     }
 }

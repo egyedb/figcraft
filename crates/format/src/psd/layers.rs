@@ -14,7 +14,7 @@ use serde_json::{Map as JsonMap, Value, json};
 
 use super::effects::{self, Fx};
 use super::util::{self, MAX_SIZE, bbox, desc, num, rel};
-use super::{Shared, shape, smart, text};
+use super::{Shared, fills, shape, smart, text};
 
 /// Deepest group nesting followed.
 const MAX_DEPTH: usize = 200;
@@ -254,7 +254,7 @@ pub(crate) fn to_rest(sh: &mut Shared, file: Rc<PsdFile>, name: &str) -> Value {
 }
 
 /// The flattened picture of the file as an image layer placed by `base`.
-fn composite(sh: &mut Shared, fx: &FileCx, base: Affine, name: &str) -> Option<Built> {
+pub(crate) fn composite(sh: &mut Shared, fx: &FileCx, base: Affine, name: &str) -> Option<Built> {
     let key = format!("{}:composite", fx.id);
     let r = cached_image(sh, key, || {
         let img = fx.file.composite_rgba8().ok()?;
@@ -439,11 +439,11 @@ fn layer(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usize, base: Af
         }
         return raster(sh, fx, rec, index, base, fxs).map(|r| (r, true));
     }
-    if fill_key == Some(b"SoCo") {
-        return fill_layer(sh, fx, rec, base, fxs).map(|f| (f, false));
-    }
     if fill_key.is_some() {
-        sh.note("gradient and pattern fill layers kept the pixels Photoshop rendered for them");
+        if let Some(f) = fill_layer(sh, fx, rec, base, fxs) {
+            return Some((f, false));
+        }
+        sh.note("fill layers that couldn't be read kept the pixels Photoshop rendered for them");
     }
     raster(sh, fx, rec, index, base, fxs).map(|r| (r, true))
 }
@@ -477,14 +477,33 @@ pub(crate) fn raster(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usi
     if rec.rect.is_empty() {
         return None;
     }
-    let key = format!("{}:{index}:{:?}", fx.id, fxs.overlay.map(|(c, a)| (c.map(|v| (v * 255.0) as u8), (a * 255.0) as u8)));
+    let look = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}{:?}{:?}", fxs.overlay, fxs.gradient, fxs.pattern).hash(&mut h);
+        h.finish()
+    };
+    let key = format!("{}:{index}:{look:x}", fx.id);
     let file = &fx.file;
     let has_mask = user_mask(rec).is_some();
+    let tile = fxs.pattern.as_ref().and_then(|p| fills::tile(sh, fx, &p.id));
+    if fxs.pattern.is_some() && tile.is_none() {
+        sh.note("pattern overlays whose pattern isn't in the file were left out");
+    }
+    let canvas = Rect::new(0.0, 0.0, fx.w, fx.h);
     let r = cached_image(sh, key, || {
         let layer = file.layer(index)?;
         let mut img = layer.rgba8().ok()?;
         if has_mask && let Some(Ok(mask)) = layer.user_mask() {
             bake_mask(&mut img, &mask);
+        }
+        // Photoshop stacks the overlays pattern, gradient, colour (top).
+        let origin = (f64::from(img.left), f64::from(img.top));
+        if let (Some(p), Some(t)) = (&fxs.pattern, &tile) {
+            fills::bake_pattern(t, p, &mut img.data, img.width, origin, fills::layer_box(rec));
+        }
+        if let Some(g) = &fxs.gradient {
+            fills::bake_gradient(g, fills::reference(g, fills::layer_box(rec), canvas), &mut img.data, img.width, origin);
         }
         if let Some((c, a)) = fxs.overlay {
             overlay(&mut img.data, c, a);
@@ -538,10 +557,9 @@ fn overlay(data: &mut [u8], color: [f64; 3], opacity: f64) {
     }
 }
 
-/// A solid colour fill layer: a rectangle over the canvas (its masks shape it).
+/// A fill layer (solid colour, gradient or pattern): a rectangle over the canvas (its masks
+/// shape it).
 fn fill_layer(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, base: Affine, fxs: &Fx) -> Option<Built> {
-    let d = rec.block(b"SoCo").and_then(|b| util::versioned(&b.data))?;
-    let c = fxs.overlay.map(|(c, _)| c).or_else(|| desc(&d, "Clr ").and_then(util::color))?;
     // A mask that hides everything outside its box needs nothing beyond it.
     let r = match user_mask(rec) {
         Some(m) if m.default_color == 0 && !m.rect.is_empty() => {
@@ -549,9 +567,25 @@ fn fill_layer(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, base: Affine, fxs
         }
         _ => Rect::new(0.0, 0.0, fx.w, fx.h),
     };
-    let mut b = Built::new(sh, "RECTANGLE", &rec.name(), base * Affine::translate((r.x0, r.y0)), r.width(), r.height());
     let a = f64::from(rec.fill_opacity()) / 255.0;
-    b.node.insert("fills".into(), json!([{"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": a}]));
+    let canvas = Rect::new(0.0, 0.0, fx.w, fx.h);
+    let d = |key: &[u8; 4]| rec.block(key).and_then(|b| util::versioned(&b.data));
+    let mut paints = if let Some(d) = d(b"SoCo") {
+        let c = desc(&d, "Clr ").and_then(util::color)?;
+        vec![json!({"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": a})]
+    } else if let Some(d) = d(b"GdFl") {
+        let g = fills::gradient(&d, a)?;
+        vec![fills::paint(&g, fills::reference(&g, r, canvas), r)]
+    } else {
+        let p = fills::pattern(&d(b"PtFl")?, a)?;
+        vec![fills::pattern_paint(sh, fx, &p)?]
+    };
+    paints.extend(fills::overlay_paints(sh, fx, rec, fxs, r));
+    if let Some((c, o)) = fxs.overlay {
+        paints.push(json!({"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": o}));
+    }
+    let mut b = Built::new(sh, "RECTANGLE", &rec.name(), base * Affine::translate((r.x0, r.y0)), r.width(), r.height());
+    b.node.insert("fills".into(), Value::Array(paints));
     Some(b)
 }
 
@@ -577,8 +611,18 @@ fn masks(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, b: Built, base: Affine
         // The group keeps passing through; the masked group takes its mode.
         content.node.insert("blendMode".into(), m);
     }
-    mask_nodes.push(content);
-    let Some(mut g) = group(sh, &name, mask_nodes) else { return Built::new(sh, "GROUP", &name, base, 0.0, 0.0) };
+    // A mask masks the layers above it up to the next mask: each mask gets a group of its own,
+    // the outer one (the vector mask) holding the inner one.
+    let mut inner = content;
+    let count = mask_nodes.len();
+    for (i, m) in mask_nodes.into_iter().rev().enumerate() {
+        let label = if i + 1 == count { name.clone() } else { format!("{name} (masked)") };
+        match group(sh, &label, vec![m, inner]) {
+            Some(g) => inner = g,
+            None => return Built::new(sh, "GROUP", &name, base, 0.0, 0.0),
+        }
+    }
+    let mut g = inner;
     for (k, v) in moved {
         g.node.insert(k.into(), v);
     }

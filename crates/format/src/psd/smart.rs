@@ -209,7 +209,7 @@ pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usiz
     // What the component holds, and its key and size.
     // A colour overlay recolours the placed file: the pixels with the overlay stand for it then.
     let found = match sh.components.get(&p.uuid) {
-        _ if fxs.overlay.is_some() => None,
+        _ if fxs.overlay.is_some() || fxs.gradient.is_some() || fxs.pattern.is_some() => None,
         Some(m) => Some((p.uuid.clone(), m.w, m.h)),
         None => link.and_then(|l| source(sh, fx, l)).map(|(src, w, h)| {
             make_main(sh, &p.uuid, &name, src, w, h);
@@ -225,13 +225,13 @@ pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usiz
                 return None;
             }
             let (rw, rh) = (rec.rect.width() as f64, rec.rect.height() as f64);
-            let look = Fx { overlay: fxs.overlay, ..Fx::default() };
+            let look = Fx { overlay: fxs.overlay, gradient: fxs.gradient.clone(), pattern: fxs.pattern.clone(), ..Fx::default() };
             let r = layers::raster(sh, fx, rec, index, Affine::IDENTITY, &look).and_then(|b| {
                 b.node.get("fills").and_then(|f| f.get(0)).and_then(|f| f.get("imageRef")).and_then(Value::as_str).map(str::to_string)
             })?;
             let key = format!("pixels|{r}");
             if !sh.components.contains_key(&key) {
-                if fxs.overlay.is_some() {
+                if fxs.overlay.is_some() || fxs.gradient.is_some() || fxs.pattern.is_some() {
                     sh.note("recoloured smart objects became components holding their pixels with the colour overlay");
                 } else if link.is_some_and(|l| l.data.is_some()) {
                     sh.note("vector smart objects became components holding the pixels Photoshop rendered for them");
@@ -310,7 +310,12 @@ fn content(sh: &mut Shared, src: &Source, w: f64, h: f64, base: Affine) -> Vec<B
             let fx = FileCx::with_id(sh, file.clone(), *id);
             let tree = file.layer_tree_max_depth(200);
             sh.depth += 1;
-            let kids = layers::build_list(sh, &fx, &tree, base, 1);
+            // A flattened file: its picture is all there is.
+            let kids = if tree.is_empty() {
+                layers::composite(sh, &fx, base, "Image").into_iter().collect()
+            } else {
+                layers::build_list(sh, &fx, &tree, base, 1)
+            };
             sh.depth -= 1;
             kids
         }

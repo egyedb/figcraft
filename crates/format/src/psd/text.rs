@@ -176,6 +176,21 @@ pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, base: Affin
         b.node.insert("styleOverrideTable".into(), Value::Object(table));
     }
     b.node.insert("style".into(), Value::Object(style));
+    // Gradient and pattern overlays paint the type over its own colour.
+    let extra = super::fills::overlay_paints(sh, fx, rec, fxs, figcraft_doc::geom::Rect::new(0.0, 0.0, w.max(1.0), h.max(1.0)));
+    if !extra.is_empty() {
+        let add = |st: &mut Value| {
+            if let Some(Value::Array(f)) = st.get_mut("fills") {
+                f.extend(extra.iter().cloned());
+            }
+        };
+        if let Some(st) = b.node.get_mut("style") {
+            add(st);
+        }
+        if let Some(Value::Object(t)) = b.node.get_mut("styleOverrideTable") {
+            t.values_mut().for_each(add);
+        }
+    }
     if let Some(s) = &fxs.stroke {
         effects::apply_stroke(&mut b.node, s);
     }

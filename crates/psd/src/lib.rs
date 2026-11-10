@@ -60,6 +60,7 @@ pub mod layer;
 mod lazy;
 pub mod metadata;
 pub mod path;
+pub mod patterns;
 pub mod pixels;
 pub mod resources;
 pub mod rows;

@@ -134,10 +134,6 @@ fn live_shape(rec: &LayerRecord, path_box: Rect) -> Option<Live> {
 
 /// A shape layer (`None` when it should keep Photoshop's pixels instead).
 pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, base: Affine, fxs: &Fx) -> Option<Built> {
-    if rec.block(b"GdFl").is_some() || rec.block(b"PtFl").is_some() {
-        sh.note("shapes with gradient or pattern fills kept the pixels Photoshop rendered for them");
-        return None;
-    }
     let lp = layer_path(sh, fx, rec)?;
     if lp.inverted {
         sh.note("inverted shapes kept the pixels Photoshop rendered for them");
@@ -179,15 +175,33 @@ pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, base: Affin
     let fill_opacity = f64::from(rec.fill_opacity()) / 255.0;
     let stroke = rec.block(b"vstk").and_then(|s| util::versioned(&s.data));
     let fill_on = stroke.as_ref().and_then(|s| flag(s, "fillEnabled")).unwrap_or(true);
-    let color = fxs
-        .overlay
-        .map(|(c, _)| c)
-        .or_else(|| rec.block(b"SoCo").and_then(|s| util::versioned(&s.data)).and_then(|d| desc(&d, "Clr ").and_then(util::color)));
-    let fills = match color {
-        Some(c) if fill_on => json!([{"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": fill_opacity}]),
-        _ => json!([]),
-    };
-    b.node.insert("fills".into(), fills);
+    let node_box = Rect::new(at.0, at.1, at.0 + w, at.1 + h);
+    let canvas = Rect::new(0.0, 0.0, fx.w, fx.h);
+    let block = |key: &[u8; 4]| rec.block(key).and_then(|s| util::versioned(&s.data));
+    let mut fills: Vec<Value> = Vec::new();
+    if fill_on {
+        if let Some(c) = block(b"SoCo").and_then(|d| desc(&d, "Clr ").and_then(util::color)) {
+            fills.push(json!({"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": fill_opacity}));
+        } else if let Some(d) = block(b"GdFl") {
+            let Some(g) = super::fills::gradient(&d, fill_opacity) else {
+                sh.note("shapes with noise gradients kept the pixels Photoshop rendered for them");
+                return None;
+            };
+            fills.push(super::fills::paint(&g, super::fills::reference(&g, node_box, canvas), node_box));
+        } else if let Some(d) = block(b"PtFl") {
+            let Some(p) = super::fills::pattern(&d, fill_opacity).and_then(|p| super::fills::pattern_paint(sh, fx, &p)) else {
+                sh.note("shapes whose pattern isn't in the file kept the pixels Photoshop rendered for them");
+                return None;
+            };
+            fills.push(p);
+        }
+        // The layer style's overlays, over the shape's own fill (pattern, gradient, colour on top).
+        fills.extend(super::fills::overlay_paints(sh, fx, rec, fxs, node_box));
+        if let Some((c, o)) = fxs.overlay {
+            fills.push(json!({"type": "SOLID", "color": util::rgba(c, 1.0), "opacity": o * fill_opacity}));
+        }
+    }
+    b.node.insert("fills".into(), Value::Array(fills));
     if let Some(s) = stroke.as_ref().filter(|s| flag(s, "strokeEnabled") == Some(true)) {
         stroke_fields(sh, s, fill_opacity, &mut b.node);
     } else if let Some(s) = &fxs.stroke {
