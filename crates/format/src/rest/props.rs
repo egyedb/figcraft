@@ -302,6 +302,8 @@ fn blur(e: &Value, radius: f64) -> Blur {
         start_radius: len(e, "startRadius").unwrap_or(d.start_radius),
         start: e.get("startOffset").and_then(vec2).unwrap_or(d.start),
         end: e.get("endOffset").and_then(vec2).unwrap_or(d.end),
+        // FigCraft's own field (the REST API has none): a background blur's brightness, -1 to 1.
+        brightness: num(e, "brightness").unwrap_or(0.0),
     }
     .sanitized()
 }

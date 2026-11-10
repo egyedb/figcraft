@@ -351,3 +351,43 @@ fn hostile_backdrop_values_do_not_crash() {
     d.get_mut(pane).unwrap().effects = vec![Effect { kind: EffectKind::BackgroundBlur(figcraft_doc::Blur::uniform(1e12)), visible: true }];
     assert!(render_node(&d, f, 0.5).is_some());
 }
+
+/// The pane's background blur with `brightness` (and radius `radius`).
+fn with_brightness(radius: f64, brightness: f64) -> (Document, NodeId) {
+    let (mut d, f, pane) = scene(Holder::ClipFrame);
+    d.get_mut(pane).unwrap().effects =
+        vec![Effect { kind: EffectKind::BackgroundBlur(figcraft_doc::Blur { brightness, ..figcraft_doc::Blur::uniform(radius) }), visible: true }];
+    (d, f)
+}
+
+/// A pixel inside the pane, on the green stripe (90..120).
+fn centre(p: &Pixmap) -> [u8; 4] {
+    px(p, 105, 80)
+}
+
+#[test]
+fn background_blur_brightness_lightens_and_darkens_the_backdrop() {
+    let (plain, f) = with_brightness(BLUR, 0.0);
+    let base = centre(&render_node(&plain, f, 1.0).unwrap());
+    let (light, f) = with_brightness(BLUR, 0.5);
+    let lighter = centre(&render_node(&light, f, 1.0).unwrap());
+    let (dark, f) = with_brightness(BLUR, -0.5);
+    let darker = centre(&render_node(&dark, f, 1.0).unwrap());
+    for c in 0..3 {
+        // Halfway to white, halfway to black (within rounding).
+        let up = f64::from(base[c]) + (255.0 - f64::from(base[c])) * 0.5;
+        let down = f64::from(base[c]) * 0.5;
+        assert!((f64::from(lighter[c]) - up).abs() <= 2.0, "channel {c}: {base:?} → {lighter:?}");
+        assert!((f64::from(darker[c]) - down).abs() <= 2.0, "channel {c}: {base:?} → {darker:?}");
+    }
+    assert_eq!((lighter[3], darker[3]), (255, 255));
+}
+
+#[test]
+fn a_background_blur_that_only_brightens_still_shows() {
+    // No blur radius, just brightness: the backdrop under the pane is lightened, not left as is.
+    let (plain, f) = with_brightness(0.0, 0.0);
+    let base = centre(&render_node(&plain, f, 1.0).unwrap());
+    let (light, f) = with_brightness(0.0, 1.0);
+    assert_eq!(centre(&render_node(&light, f, 1.0).unwrap()), [255, 255, 255, 255], "{base:?}");
+}

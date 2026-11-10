@@ -138,3 +138,18 @@ fn image_colour_adjustments_become_filters() {
     let PaintKind::Image(img) = &untouched.fills[0].kind else { panic!() };
     assert!(img.filters.is_identity());
 }
+
+#[test]
+fn background_blurs_keep_their_brightness_and_fill_opacity() {
+    // Frosted glass: the fill is hidden (fill opacity 0) and the blurred backdrop lightened by 37%.
+    let n = styled(json!({"fill": rgb(255, 255, 255), "filters": [{"type": "uxdesign#blur", "params":
+        {"blurAmount": 12, "brightnessAmount": 37, "fillOpacity": 0, "backgroundEffect": true}}]}));
+    let EffectKind::BackgroundBlur(b) = &n.effects[0].kind else { panic!("{:?}", n.effects) };
+    assert_eq!(b.radius, 12.0);
+    assert!((b.brightness - 0.37).abs() < 1e-9);
+    assert_eq!(n.fills[0].opacity, 0.0);
+    // Half fill opacity keeps half the fill.
+    let half = styled(json!({"fill": rgb(255, 255, 255), "filters": [{"type": "uxdesign#blur", "params":
+        {"blurAmount": 4, "brightnessAmount": 0, "fillOpacity": 0.5, "backgroundEffect": true}}]}));
+    assert!((half.fills[0].opacity - 0.5).abs() < 1e-6);
+}

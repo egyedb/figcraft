@@ -1378,6 +1378,7 @@ pub(crate) fn set_effect_field(effects: &mut [Effect], i: usize, prop: &str, val
         (EffectKind::DropShadow(s) | EffectKind::InnerShadow(s), "color", _, VariableValue::Color(c)) => s.color = *c,
         (EffectKind::LayerBlur(b) | EffectKind::BackgroundBlur(b), "radius", Some(x), _) => b.radius = x.max(0.0),
         (EffectKind::LayerBlur(b) | EffectKind::BackgroundBlur(b), "startRadius", Some(x), _) => b.start_radius = x.max(0.0),
+        (EffectKind::BackgroundBlur(b), "brightness", Some(x), _) if x.is_finite() => b.brightness = x.clamp(-1.0, 1.0),
         (EffectKind::Glass(g), field, Some(x), _) => {
             g.set_bound(field, x);
         }

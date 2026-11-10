@@ -29,9 +29,15 @@ fn progressive_fields_round_trip() {
 
 #[test]
 fn hostile_blur_values_are_made_safe() {
-    let b =
-        Blur { radius: f64::INFINITY, blur_type: BlurType::Progressive, start_radius: -5.0, start: (f64::NAN, 1e9), end: (f64::NEG_INFINITY, 0.5) }
-            .sanitized();
+    let b = Blur {
+        radius: f64::INFINITY,
+        blur_type: BlurType::Progressive,
+        start_radius: -5.0,
+        start: (f64::NAN, 1e9),
+        end: (f64::NEG_INFINITY, 0.5),
+        brightness: 0.0,
+    }
+    .sanitized();
     assert_eq!((b.radius, b.start_radius), (0.0, 0.0));
     assert_eq!((b.start, b.end), ((0.5, 1000.0), (0.5, 0.5)));
     let huge = Blur { radius: 1e300, ..Blur::default() };
@@ -49,4 +55,17 @@ fn reach_and_backdrop_cover_the_largest_radius() {
     // Scaling scales both radii, never the unit-box points.
     let s = b.scaled(2.0);
     assert_eq!((s.radius, s.start_radius, s.start, s.end), (4.0, 60.0, b.start, b.end));
+}
+
+#[test]
+fn brightness_is_optional_in_files_and_kept_in_range() {
+    // Files written before it read as 0, and 0 isn't written.
+    let b: Blur = serde_json::from_str(r#"{"radius": 3.0}"#).unwrap();
+    assert_eq!(b.brightness, 0.0);
+    assert!(!serde_json::to_string(&Blur::uniform(3.0)).unwrap().contains("brightness"));
+    let lit = Blur { brightness: 0.4, ..Blur::uniform(3.0) };
+    let back: Blur = serde_json::from_str(&serde_json::to_string(&lit).unwrap()).unwrap();
+    assert_eq!(back.brightness, 0.4);
+    assert_eq!(Blur { brightness: 7.0, ..Blur::default() }.sanitized().brightness, 1.0);
+    assert_eq!(Blur { brightness: f64::NAN, ..Blur::default() }.sanitized().brightness, 0.0);
 }

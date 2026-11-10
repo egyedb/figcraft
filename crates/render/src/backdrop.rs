@@ -129,7 +129,7 @@ pub(crate) fn replace(dst: &mut Pixmap, at: (i32, i32), src: &Pixmap, clip: Opti
 
 /// Whether a node has a visible background blur or glass.
 pub fn has_effects(n: &Node) -> bool {
-    n.effects.iter().any(|e| (e.visible && matches!(e.kind, EffectKind::Glass(_))) || e.backdrop_radius() > 0.0)
+    n.effects.iter().any(|e| (e.visible && matches!(e.kind, EffectKind::Glass(_))) || e.backdrop_radius() > 0.0 || e.brightens_backdrop())
 }
 
 /// Pixels around a layer its backdrop effects read at `scale`.
@@ -148,9 +148,12 @@ pub fn effects(n: &Node, frame: EffectFrame<'_>) -> Option<Pixmap> {
     let mut cov: Option<Pixmap> = None;
     for e in n.effects.iter().filter(|e| e.visible) {
         let layer = match &e.kind {
-            EffectKind::BackgroundBlur(blur) if blur.max_radius() > 0.0 => {
+            EffectKind::BackgroundBlur(blur) if blur.max_radius() > 0.0 || e.brightens_backdrop() => {
                 let mut b = back.clone();
-                crate::blur::apply(&mut b, blur, (n.width, n.height), Affine::translate((f64::from(pad), f64::from(pad))) * xf, scale);
+                if blur.max_radius() > 0.0 {
+                    crate::blur::apply(&mut b, blur, (n.width, n.height), Affine::translate((f64::from(pad), f64::from(pad))) * xf, scale);
+                }
+                brighten(&mut b, blur.sanitized().brightness);
                 let mut l = Pixmap::new(w, h)?;
                 let copy = PixmapPaint { blend_mode: tiny_skia::BlendMode::Source, ..Default::default() };
                 l.draw_pixmap(-pad_i, -pad_i, b.as_ref(), &copy, Transform::identity(), None);
@@ -169,6 +172,27 @@ pub fn effects(n: &Node, frame: EffectFrame<'_>) -> Option<Pixmap> {
         }
     }
     out
+}
+
+/// Lighten the backdrop `p` towards white by `k` (0..=1), or darken it towards black by `-k`, as a
+/// background blur's brightness does. The pixels are premultiplied: white at a pixel is its alpha.
+pub(crate) fn brighten(p: &mut Pixmap, k: f64) {
+    if !(k.is_finite() && k != 0.0) {
+        return;
+    }
+    let k = k.clamp(-1.0, 1.0) as f32;
+    for px in p.pixels_mut() {
+        let a = f32::from(px.alpha());
+        let ch = |c: u8| {
+            let c = f32::from(c);
+            let v = if k > 0.0 { c + (a - c) * k } else { c * (1.0 + k) };
+            v.round().clamp(0.0, a) as u8
+        };
+        let (r, g, b) = (ch(px.red()), ch(px.green()), ch(px.blue()));
+        if let Some(q) = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, px.alpha()) {
+            *px = q;
+        }
+    }
 }
 
 /// Hide node `id` and everything painted after it (later siblings up its ancestry, the later

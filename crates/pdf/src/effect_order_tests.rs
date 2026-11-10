@@ -46,7 +46,7 @@ fn a_frames_children_go_over_its_inner_shadow() {
 
 #[test]
 fn pdf_progressive_background_blur_matches_the_png() {
-    let b = Blur { radius: 16.0, blur_type: BlurType::Progressive, start_radius: 2.0, start: (0.0, 0.5), end: (1.0, 0.5) };
+    let b = Blur { radius: 16.0, blur_type: BlurType::Progressive, start_radius: 2.0, start: (0.0, 0.5), end: (1.0, 0.5), brightness: 0.0 };
     let (d, f, pane) = scene(EffectKind::BackgroundBlur(b));
     let diff = pdf_vs_png(&d, f, pane);
     assert!(diff <= 3, "{diff}");

@@ -793,11 +793,15 @@ pub struct Blur {
     /// Progressive: where the ramp ends, in the layer's unit box.
     #[serde(alias = "endOffset")]
     pub end: (f64, f64),
+    /// Background blurs: how far the blurred backdrop is lightened, towards white (up to 1), or
+    /// darkened, towards black (down to -1); 0 leaves it as it is. Layer blurs ignore it.
+    #[serde(skip_serializing_if = "crate::node::is_default")]
+    pub brightness: f64,
 }
 
 impl Default for Blur {
     fn default() -> Self {
-        Self { radius: 4.0, blur_type: BlurType::Uniform, start_radius: 0.0, start: (0.5, 0.0), end: (0.5, 1.0) }
+        Self { radius: 4.0, blur_type: BlurType::Uniform, start_radius: 0.0, start: (0.5, 0.0), end: (0.5, 1.0), brightness: 0.0 }
     }
 }
 
@@ -826,6 +830,7 @@ impl Blur {
             start_radius: radius(self.start_radius),
             start: point(self.start, d.start),
             end: point(self.end, d.end),
+            brightness: if self.brightness.is_finite() { self.brightness.clamp(-1.0, 1.0) } else { 0.0 },
         }
     }
 
@@ -981,6 +986,10 @@ impl Effect {
             (EffectKind::Noise(n), true) => Some(&mut n.secondary),
             _ => None,
         }
+    }
+    /// Whether this is a visible background blur that changes the backdrop's brightness.
+    pub fn brightens_backdrop(&self) -> bool {
+        self.visible && matches!(&self.kind, EffectKind::BackgroundBlur(b) if b.sanitized().brightness != 0.0)
     }
     /// How far around the node a backdrop effect (background blur, glass) reads what is behind
     /// it, as a blur radius (document units); 0 for other effects.

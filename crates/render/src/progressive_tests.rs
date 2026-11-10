@@ -8,7 +8,7 @@ use figcraft_doc::{Blur, BlurType, Document, Effect, EffectKind, NodeId, NodeKin
 use super::*;
 
 fn progressive(start_radius: f64, radius: f64, start: (f64, f64), end: (f64, f64)) -> Blur {
-    Blur { radius, blur_type: BlurType::Progressive, start_radius, start, end }
+    Blur { radius, blur_type: BlurType::Progressive, start_radius, start, end, brightness: 0.0 }
 }
 
 /// A white 200 × 200 frame (not clipping) with black vertical stripes 4 wide every 8.

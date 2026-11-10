@@ -171,6 +171,14 @@ pub(crate) fn apply(cx: &mut Cx, st: Option<&Value>, w: f64, h: f64, text: bool,
     if text && fill.is_none() {
         paints.push(json!({"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}));
     }
+    // Behind a background blur XD shows the layer's fill at the blur's fill opacity (often none:
+    // frosted glass).
+    if let Some(o) = st.and_then(backdrop_fill_opacity) {
+        for p in &mut paints {
+            let own = p.get("opacity").and_then(Value::as_f64).unwrap_or(1.0);
+            p["opacity"] = json!((own * o).clamp(0.0, 1.0));
+        }
+    }
     let single = paints.len() == 1;
     node.insert("fills".into(), Value::Array(paints));
     if single && let Some(id) = super::assets::paint_link(cx, fill) {
@@ -206,6 +214,19 @@ pub(crate) fn link(node: &mut JsonMap<String, Value>, slot: &str, id: String) {
     if let Some(m) = styles.as_object_mut() {
         m.insert(slot.into(), json!(id));
     }
+}
+
+/// The fill opacity a visible background blur in style `st` gives the layer's fills, when it isn't 1.
+fn backdrop_fill_opacity(st: &Value) -> Option<f64> {
+    let filters = st.get("filters").and_then(Value::as_array)?;
+    filters
+        .iter()
+        .filter(|f| f.get("visible").and_then(Value::as_bool) != Some(false) && f.get("type").and_then(Value::as_str) == Some("uxdesign#blur"))
+        .filter_map(|f| f.get("params"))
+        .filter(|p| p.get("backgroundEffect").and_then(Value::as_bool) == Some(true))
+        .find_map(|p| p.get("fillOpacity").and_then(Value::as_f64))
+        .filter(|o| o.is_finite() && *o < 1.0)
+        .map(|o| o.clamp(0.0, 1.0))
 }
 
 /// An XD (CSS) blend mode as a REST one.
@@ -304,10 +325,14 @@ fn effects(cx: &mut Cx, filters: Option<&Value>) -> Vec<Value> {
                 let amount = params.and_then(|p| p.get("blurAmount")).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
                 let background = params.and_then(|p| p.get("backgroundEffect")).and_then(Value::as_bool) == Some(true);
                 let ty = if background { "BACKGROUND_BLUR" } else { "LAYER_BLUR" };
-                if background {
-                    cx.warn("the brightness and fill opacity of background blurs were left out");
+                let mut effect = json!({"type": ty, "visible": true, "radius": amount.clamp(0.0, MAX_LEN)});
+                // XD's brightness of the blurred backdrop, -100 to 100 (its fill opacity goes on the
+                // fills, see `apply`).
+                let brightness = params.and_then(|p| p.get("brightnessAmount")).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0);
+                if background && brightness != 0.0 {
+                    effect["brightness"] = json!((brightness / 100.0).clamp(-1.0, 1.0));
                 }
-                out.push(json!({"type": ty, "visible": true, "radius": amount.clamp(0.0, MAX_LEN)}));
+                out.push(effect);
             }
             Some(other) => cx.warn(format!("{} effects are not supported yet and were skipped", clip(other))),
             None => {}

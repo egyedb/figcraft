@@ -220,6 +220,21 @@ fn effect_settings(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &
                     edit(app, ed, &|v| with(&|b2| b2.radius = v.clamp(0.0, MAX_BLUR_RADIUS)));
                 }
             });
+            // A background blur lightens or darkens the blurred backdrop (-100% to 100%).
+            if matches!(e.kind, EffectKind::BackgroundBlur(_)) {
+                row(ui, 32.0, |ui| {
+                    let ed = widgets::number_field(
+                        ui,
+                        Id::unique(("fx_bright", i)),
+                        Lead::Text(tr("Brightness")),
+                        Some((b.brightness * 100.0).round()),
+                        "%",
+                        ui.available_width(),
+                        1.0,
+                    );
+                    edit(app, ed, &|v| with(&|b2| b2.brightness = (v / 100.0).clamp(-1.0, 1.0)));
+                });
+            }
         }
         EffectKind::Noise(nz) => {
             let with = |f: &dyn Fn(&mut Noise)| {

@@ -807,3 +807,12 @@ fn frame_guides_are_read() {
     assert!(g[0].vertical && close(g[0].offset, 200.0));
     assert!(!g[1].vertical && close(g[1].offset, 50.5));
 }
+
+#[test]
+fn background_blur_brightness_is_read() {
+    let (doc, _) = one(json!([{"id": "1:1", "name": "Pane", "type": "RECTANGLE", "relativeTransform": at(0.0, 0.0), "size": {"x": 10, "y": 10},
+        "effects": [{"type": "BACKGROUND_BLUR", "visible": true, "radius": 8, "brightness": 0.37}, {"type": "BACKGROUND_BLUR", "visible": true, "radius": 8, "brightness": 9}]}]));
+    let e = &named(&doc, "Pane").effects;
+    assert!(matches!(&e[0].kind, EffectKind::BackgroundBlur(b) if close(b.brightness, 0.37)));
+    assert!(matches!(&e[1].kind, EffectKind::BackgroundBlur(b) if close(b.brightness, 1.0)));
+}
