@@ -21,6 +21,8 @@ use figcraft_doc::{BoolOp, WindingRule};
 const MAX_SHAPES: usize = 5_000;
 /// Most path elements kept from one file.
 const MAX_ELEMENTS: usize = 500_000;
+/// Most paths merged into one compound path.
+const MAX_MERGED: usize = 4_000;
 /// Largest file read.
 const MAX_BYTES: usize = 64 << 20;
 
@@ -78,7 +80,62 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Art, &'static str> {
     if dev.shapes.is_empty() {
         return Err("nothing drawn");
     }
-    Ok(Art { w, h, shapes: dev.shapes })
+    Ok(Art { w, h, shapes: merge(dev.shapes) })
+}
+
+/// Paths painted one after another the same way become one compound path: fills of the same
+/// colour and rule that don't overlap (overlapping ones could cut holes into each other), and
+/// strokes with the same colour and settings. Only neighbours merge, so the stacking stays as
+/// drawn. A pattern of thousands of dots becomes one layer per colour.
+fn merge(shapes: Vec<Painted>) -> Vec<Painted> {
+    let mut out: Vec<Painted> = Vec::new();
+    // The boxes of the paths merged into the last shape.
+    let mut boxes: Vec<kurbo::Rect> = Vec::new();
+    for s in shapes {
+        // What the shape paints: its path, and its stroke's half width around it.
+        let half = s.stroke.as_ref().map_or(0.0, |st| st.width / 2.0);
+        let bb = s.path.bounding_box().inflate(half, half);
+        let joins = out
+            .last()
+            .is_some_and(|last| last.fill == s.fill && last.stroke == s.stroke && (s.fill.is_none() || !boxes.iter().any(|o| overlaps(*o, bb))));
+        match out.last_mut() {
+            Some(last) if joins && boxes.len() < MAX_MERGED => {
+                last.path.extend(s.path.elements().iter().copied());
+                boxes.push(bb);
+            }
+            _ => {
+                boxes = vec![bb];
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Whether two paths draw the same outline (a closing segment back to the start aside).
+fn same_outline(a: &BezPath, b: &BezPath) -> bool {
+    use kurbo::PathEl;
+    let trim = |p: &BezPath| -> Vec<PathEl> {
+        let mut v: Vec<PathEl> = p.elements().to_vec();
+        while matches!(v.last(), Some(PathEl::ClosePath)) {
+            v.pop();
+        }
+        v
+    };
+    let (a, b) = (trim(a), trim(b));
+    let close = |p: kurbo::Point, q: kurbo::Point| (p - q).hypot() < 1e-6;
+    a.len() == b.len()
+        && a.iter().zip(&b).all(|pair| match pair {
+            (PathEl::MoveTo(p), PathEl::MoveTo(q)) | (PathEl::LineTo(p), PathEl::LineTo(q)) => close(*p, *q),
+            (PathEl::QuadTo(p1, p2), PathEl::QuadTo(q1, q2)) => close(*p1, *q1) && close(*p2, *q2),
+            (PathEl::CurveTo(p1, p2, p3), PathEl::CurveTo(q1, q2, q3)) => close(*p1, *q1) && close(*p2, *q2) && close(*p3, *q3),
+            _ => false,
+        })
+}
+
+/// Whether two boxes share area.
+fn overlaps(a: kurbo::Rect, b: kurbo::Rect) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
 /// The device collecting shapes.
@@ -203,6 +260,15 @@ impl<'a> Device<'a> for Collect {
                     },
                     dashes: s.dash_array.iter().map(|v| (f64::from(*v) * sx).clamp(0.0, 10_000.0)).collect(),
                 };
+                // A path filled and then stroked (Illustrator's fill and stroke) is one shape.
+                if let Some(last) = self.shapes.last_mut()
+                    && last.stroke.is_none()
+                    && last.fill.is_some()
+                    && same_outline(&last.path, &placed)
+                {
+                    last.stroke = Some(stroke);
+                    return;
+                }
                 self.shapes.push(Painted { path: placed, fill: None, stroke: Some(stroke) });
             }
         }

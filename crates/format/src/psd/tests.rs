@@ -597,3 +597,15 @@ fn vector_smart_objects_with_text_keep_their_pixels() {
     let child = main.children.first().and_then(|c| doc.node(*c)).unwrap();
     assert!(child.fills.iter().any(|p| format!("{p:?}").contains("Image")));
 }
+
+/// Neighbouring paths of one colour that don't overlap become one compound path; one that
+/// overlaps them stays a layer of its own.
+#[test]
+fn same_colour_paths_of_vector_smart_objects_merge_unless_they_overlap() {
+    let pdf = tiny_pdf(20, 10, "1 0 0 rg 0 0 4 4 re f 6 0 4 4 re f 12 0 4 4 re f 13 1 4 4 re f");
+    let (doc, notes) = import(&placing("Dots.ai", &pdf, 20, 10, Vec::new()));
+    let group = doc.nodes().find(|n| n.name == "Vector").unwrap_or_else(|| panic!("{notes:?}"));
+    let paths: Vec<&Node> = group.children.iter().filter_map(|c| doc.node(*c)).collect();
+    assert_eq!(paths.len(), 2, "three dots merge, the overlapping one stays apart");
+    assert_eq!((paths[0].width, paths[0].height), (16.0, 4.0));
+}
