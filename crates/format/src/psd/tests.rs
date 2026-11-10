@@ -485,3 +485,115 @@ fn flattened_placed_files_give_their_component_its_picture() {
     let child = main.children.first().and_then(|c| doc.node(*c)).expect("the component holds the file's picture");
     assert!(child.fills.iter().any(|p| format!("{p:?}").contains("Image")), "{:?}", child.fills);
 }
+
+/// A one-page PDF `w` × `h` points drawing `content`, with a correct cross-reference table.
+fn tiny_pdf(w: u32, h: u32, content: &str) -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] /Contents 4 0 R /Resources << >> >>"),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+    out
+}
+
+/// A PSD placing the embedded file `bytes` (named `name`, `w` × `h`) at (10, 10), at its size,
+/// with layer style blocks `extra`.
+fn placing(name: &str, bytes: &[u8], w: u32, h: u32, extra: Vec<TaggedBlock>) -> Vec<u8> {
+    let uuid = "7f0c1d2e-0000-4000-8000-0000000000aa";
+    let mut item = b"liFD".to_vec();
+    item.extend_from_slice(&7u32.to_be_bytes());
+    item.push(uuid.len() as u8);
+    item.extend_from_slice(uuid.as_bytes());
+    let units: Vec<u16> = name.encode_utf16().collect();
+    item.extend_from_slice(&(units.len() as u32).to_be_bytes());
+    item.extend(units.iter().flat_map(|u| u.to_be_bytes()));
+    item.extend_from_slice(b"PDF \0\0\0\0");
+    item.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    item.push(0);
+    item.extend_from_slice(bytes);
+    let mut lnk2 = (item.len() as u64).to_be_bytes().to_vec();
+    lnk2.extend_from_slice(&item);
+    while !lnk2.len().is_multiple_of(4) {
+        lnk2.push(0);
+    }
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let corners = [10.0, 10.0, 10.0 + fw, 10.0, 10.0 + fw, 10.0 + fh, 10.0, 10.0 + fh];
+    let d = Descriptor::new("null")
+        .with("Idnt", D::Text(UnicodeString::new(uuid)))
+        .with("Trnf", D::List(corners.iter().map(|v| D::Double(*v)).collect()))
+        .with("Sz  ", D::Descriptor(Descriptor::new("Pnt ").with("Wdth", D::Double(fw)).with("Hght", D::Double(fh))));
+    let mut sold = b"soLD".to_vec();
+    sold.extend_from_slice(&4u32.to_be_bytes());
+    sold.extend(versioned(d));
+    let mut spec = LayerSpec::new("Icon", 10, 10, w, h, solid(w, h, [255, 0, 0, 255]));
+    spec.extra_blocks = vec![TaggedBlock::new(*b"SoLd", sold)];
+    spec.extra_blocks.extend(extra);
+    let mut b = base(60, 60);
+    b.push_layer(spec);
+    let mut file = b.build().unwrap();
+    file.global_blocks.push(TaggedBlock::new(*b"lnk2", lnk2));
+    file.to_bytes().unwrap()
+}
+
+fn solid_fill_of(n: &Node) -> Option<figcraft_doc::color::Color> {
+    n.fills.iter().find_map(|p| match &p.kind {
+        figcraft_doc::color::PaintKind::Solid { color } => Some(*color),
+        _ => None,
+    })
+}
+
+/// A vector smart object becomes a component holding its paths, with Photoshop's pixels above.
+#[test]
+fn vector_smart_objects_become_vector_components_with_photoshops_picture_above() {
+    let pdf = tiny_pdf(20, 10, "1 0 0 rg 0 0 20 10 re f");
+    let (doc, notes) = import(&placing("Icon.ai", &pdf, 20, 10, Vec::new()));
+    let main = doc.nodes().find(|n| matches!(n.kind, NodeKind::Component { .. })).unwrap_or_else(|| panic!("no component: {notes:?}"));
+    assert_eq!(main.name, "Icon.ai");
+    assert_eq!((main.width, main.height), (20.0, 10.0));
+    let kids: Vec<&Node> = main.children.iter().filter_map(|c| doc.node(*c)).collect();
+    assert_eq!(kids.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["Vector", "Photoshop render"], "{notes:?}");
+    let path = kids[0].children.first().and_then(|c| doc.node(*c)).unwrap();
+    assert!(matches!(path.kind, NodeKind::Vector { .. }));
+    assert_eq!((path.width, path.height), (20.0, 10.0));
+    let c = solid_fill_of(path).unwrap();
+    assert!(c.r > 0.99 && c.g < 0.01 && c.b < 0.01, "{c:?}");
+}
+
+/// A solid colour overlay recolours the vectors.
+#[test]
+fn colour_overlays_recolour_vector_smart_objects() {
+    let pdf = tiny_pdf(20, 10, "0 0 0 rg 0 0 20 10 re f");
+    let overlay = Descriptor::new("SoFi")
+        .with("enab", D::Boolean(true))
+        .with("Md  ", D::Enumerated { type_id: Id::new("BlnM"), value: Id::new("Nrml") })
+        .with("Clr ", rgb(0.0, 200.0, 100.0))
+        .with("Opct", D::UnitFloat { unit: *b"#Prc", value: 100.0 });
+    let (doc, _) = import(&placing("Check.ai", &pdf, 20, 10, vec![style(vec![("SoFi", overlay)])]));
+    let path = doc.nodes().find(|n| matches!(n.kind, NodeKind::Vector { .. }) && n.name == "Path").unwrap();
+    let c = solid_fill_of(path).unwrap();
+    assert!(c.r < 0.01 && (c.g - 200.0 / 255.0).abs() < 0.01 && (c.b - 100.0 / 255.0).abs() < 0.01, "{c:?}");
+}
+
+/// Artwork with something vectors can't hold the same way keeps Photoshop's pixels only.
+#[test]
+fn vector_smart_objects_with_text_keep_their_pixels() {
+    let pdf = tiny_pdf(20, 10, "BT /F1 8 Tf 0 0 Td (Hi) Tj ET");
+    let (doc, _) = import(&placing("Text.ai", &pdf, 20, 10, Vec::new()));
+    assert!(!doc.nodes().any(|n| n.name == "Vector"));
+    let main = doc.nodes().find(|n| matches!(n.kind, NodeKind::Component { .. })).unwrap();
+    let child = main.children.first().and_then(|c| doc.node(*c)).unwrap();
+    assert!(child.fills.iter().any(|p| format!("{p:?}").contains("Image")));
+}

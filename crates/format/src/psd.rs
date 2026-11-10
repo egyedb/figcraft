@@ -10,8 +10,10 @@
 //! * type layers become text with their fonts, sizes, colours, tracking, leading and alignment;
 //! * shape layers become rectangles, ellipses (live shapes) or vectors, with fill and stroke;
 //! * smart objects become instances of a component per placed file: an embedded or linked PSD
-//!   becomes the component's own layers, an embedded image its picture, anything else (a vector
-//!   smart object, a missing link) the pixels Photoshop rendered for it;
+//!   becomes the component's own layers, an embedded image its picture, a vector smart object
+//!   (an Illustrator file saved with PDF content, read with craft-pdf) its paths as vector layers
+//!   under Photoshop's picture of it, recoloured by a colour overlay; anything else (a missing
+//!   link, artwork vectors can't hold) the pixels Photoshop rendered for it;
 //! * drop and inner shadows, outer and inner glows, colour overlays and strokes become effects,
 //!   fills and strokes; gradient overlays and gradient fill layers become gradient fills, pattern
 //!   overlays and pattern fill layers tiled image fills of the file's pattern (painted into the
@@ -31,6 +33,7 @@ mod smart;
 mod tests;
 mod text;
 mod util;
+mod vector;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
@@ -144,6 +147,10 @@ pub(crate) struct Shared {
     pub tiles: HashMap<(usize, String), Option<Rc<fills::Tile>>>,
     /// The files whose patterns were read.
     pub tiles_read: std::collections::HashSet<usize>,
+    /// The first uuid of each embedded file's bytes, by file id, hash and length.
+    pub same_file: HashMap<(usize, u64, usize), String>,
+    /// Vector smart objects read so far, by the uuid of their file (`None`: not kept as vectors).
+    pub vectors: HashMap<String, Option<Rc<vector::Art>>>,
     /// Each mapped file's parsed `Txt2`, by its id.
     pub txt2_cache: HashMap<usize, Rc<Option<figcraft_psd::engine_data::Value>>>,
 }
@@ -174,6 +181,8 @@ impl Shared {
             counts: BTreeMap::new(),
             next_file: 0,
             txt2_cache: HashMap::new(),
+            vectors: HashMap::new(),
+            same_file: HashMap::new(),
             tiles: HashMap::new(),
             tiles_read: std::collections::HashSet::new(),
         }

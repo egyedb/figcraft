@@ -8,12 +8,16 @@
 //!
 //! * a placed PSD's own layers (an embedded one, or a linked one the caller finds);
 //! * a placed picture (PNG, JPEG, …) as an image;
-//! * otherwise (a vector smart object, a missing link) the pixels Photoshop rendered for the
-//!   layer. Instances turned differently get a component of their own then.
+//! * a vector smart object (an Illustrator file saved with PDF content) its paths as vector
+//!   layers, with the pixels Photoshop rendered for it above them (to compare, hide or delete);
+//!   a colour overlay recolours the vectors, one component per colour;
+//! * otherwise (a missing link, artwork the vectors can't hold) the pixels Photoshop rendered for
+//!   the layer. Instances turned differently get a component of their own then.
 
 use std::rc::Rc;
 
-use figcraft_doc::geom::Affine;
+use figcraft_doc::VectorNetwork;
+use figcraft_doc::geom::{Affine, Rect, Shape};
 use figcraft_psd::{LayerRecord, PsdFile};
 use serde_json::{Value, json};
 
@@ -49,6 +53,9 @@ enum Source {
     Psd(Rc<PsdFile>, usize),
     /// A picture.
     Image(String),
+    /// Vector artwork, recoloured by a colour overlay, with Photoshop's picture of it above
+    /// (its `imageRef` and box in the artwork's space).
+    Vector { art: Rc<super::vector::Art>, recolor: Option<[f64; 3]>, render: Option<(String, Rect)> },
 }
 
 struct Rd<'a> {
@@ -203,18 +210,38 @@ pub(crate) fn build(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usiz
     if fxs.stroke.is_some() {
         sh.note("strokes on smart objects were left out");
     }
-    let p = placed(sh, rec)?;
+    let mut p = placed(sh, rec)?;
     let link = fx.links.iter().find(|l| l.uuid == p.uuid);
+    // Copies of a smart object made as new smart objects embed the same file under new ids:
+    // the same bytes stand for one component.
+    if let Some(l) = link {
+        p.uuid = canonical(sh, fx, l);
+    }
     let name = link.map_or_else(|| rec.name(), |l| l.name.clone());
-    // What the component holds, and its key and size.
-    // A colour overlay recolours the placed file: the pixels with the overlay stand for it then.
-    let found = match sh.components.get(&p.uuid) {
-        _ if fxs.overlay.is_some() || fxs.gradient.is_some() || fxs.pattern.is_some() => None,
-        Some(m) => Some((p.uuid.clone(), m.w, m.h)),
-        None => link.and_then(|l| source(sh, fx, l)).map(|(src, w, h)| {
-            make_main(sh, &p.uuid, &name, src, w, h);
-            (p.uuid.clone(), w, h)
-        }),
+    // What the component holds, and its key and size. A solid colour overlay recolours vector
+    // artwork (a component per colour); other overlays, and overlays on placed pictures or PSDs,
+    // keep the recoloured pixels.
+    let solid = fxs.overlay.filter(|(_, a)| *a >= 0.999).map(|(c, _)| c);
+    let other = fxs.gradient.is_some() || fxs.pattern.is_some() || (fxs.overlay.is_some() && solid.is_none());
+    let key = match solid {
+        Some(c) => format!("{}|{:02x}{:02x}{:02x}", p.uuid, (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8),
+        None => p.uuid.clone(),
+    };
+    let found = match sh.components.get(&key) {
+        _ if other => None,
+        Some(m) => Some((key.clone(), m.w, m.h)),
+        None => match link.and_then(|l| source(sh, fx, l)) {
+            Some((Source::Vector { art, .. }, w, h)) => {
+                let render = vector_render(sh, fx, rec, index, &p, (w, h), fxs);
+                make_main(sh, &key, &name, Source::Vector { art, recolor: solid, render }, w, h);
+                Some((key.clone(), w, h))
+            }
+            Some((src, w, h)) if solid.is_none() => {
+                make_main(sh, &key, &name, src, w, h);
+                Some((key.clone(), w, h))
+            }
+            _ => None,
+        },
     };
     let (key, m) = match found {
         Some((key, w, h)) => (key, base * p.transform * Affine::scale_non_uniform(p.size.0 / w, p.size.1 / h)),
@@ -261,7 +288,22 @@ fn source(sh: &mut Shared, fx: &FileCx, link: &Link) -> Option<(Source, f64, f64
     if sh.depth >= MAX_SMART_DEPTH {
         return None;
     }
+    if let Some(found) = sh.vectors.get(&link.uuid) {
+        return found.clone().map(|art| (Source::Vector { recolor: None, render: None, art: art.clone() }, art.w, art.h));
+    }
     let bytes = bytes_of(sh, fx, link)?;
+    if super::vector::is_pdf(&bytes) {
+        let art = match super::vector::read(&bytes) {
+            Ok(a) => Some(Rc::new(a)),
+            Err(_) => {
+                sh.note("vector smart objects with gradients, images, text, masks or blend modes kept only the pixels Photoshop rendered for them");
+                None
+            }
+        };
+        sh.vectors.insert(link.uuid.clone(), art.clone());
+        let art = art?;
+        return Some((Source::Vector { recolor: None, render: None, art: art.clone() }, art.w, art.h));
+    }
     if super::is_psd(&bytes) {
         let opened = match sh.opened.get(&link.uuid) {
             Some(o) => o.clone(),
@@ -289,6 +331,9 @@ fn make_main(sh: &mut Shared, key: &str, name: &str, src: Source, w: f64, h: f64
     let id = sh.id();
     let (x, y, row_h) = sh.main_cursor;
     let world = Affine::translate((x, y));
+    // Its place is taken before its content is built: components made for placements inside
+    // it go beside it, not on top of it.
+    sh.main_cursor = if x + w + GAP > ROW { (0.0, y + row_h.max(h) + GAP, 0.0) } else { (x + w + GAP, y, row_h.max(h)) };
     // Known before its content is built, so nested placements of the same file find it.
     sh.components.insert(key.to_string(), Main { id: id.clone(), w, h, source: src.clone() });
     let kids = content(sh, &src, w, h, world);
@@ -300,7 +345,6 @@ fn make_main(sh: &mut Shared, key: &str, name: &str, src: Source, w: f64, h: f64
     if let Value::Array(a) = layers::attach(sh, Affine::IDENTITY, vec![b]) {
         sh.mains.extend(a);
     }
-    sh.main_cursor = if x + w + GAP > ROW { (0.0, y + row_h.max(h) + GAP, 0.0) } else { (x + w + GAP, y, row_h.max(h)) };
 }
 
 /// A component's content placed by `base` (content pixels → page), scaling with its instance.
@@ -324,9 +368,85 @@ fn content(sh: &mut Shared, src: &Source, w: f64, h: f64, base: Affine) -> Vec<B
             b.node.insert("fills".into(), json!([{"type": "IMAGE", "scaleMode": "FILL", "imageRef": r}]));
             vec![b]
         }
+        Source::Vector { art, recolor, render } => {
+            let shapes: Vec<Built> = art.shapes.iter().filter_map(|s| painted(sh, s, *recolor, base)).collect();
+            let mut kids: Vec<Built> = layers::group(sh, "Vector", shapes).into_iter().collect();
+            if let Some((r, at)) = render {
+                let mut b = Built::new(sh, "RECTANGLE", "Photoshop render", base * Affine::translate((at.x0, at.y0)), at.width(), at.height());
+                b.node.insert("fills".into(), json!([{"type": "IMAGE", "scaleMode": "FILL", "imageRef": r}]));
+                kids.push(b);
+            }
+            kids
+        }
     };
     for k in &mut kids {
         k.node.insert("constraints".into(), json!({"horizontal": "SCALE", "vertical": "SCALE"}));
     }
     kids
+}
+
+/// Photoshop's picture of a vector smart object in its artwork's space (`None` when the
+/// placement turns or skews it, so the picture can't lie flat over the artwork).
+fn vector_render(sh: &mut Shared, fx: &FileCx, rec: &LayerRecord, index: usize, p: &Placed, art: (f64, f64), fxs: &Fx) -> Option<(String, Rect)> {
+    let m = p.transform * Affine::scale_non_uniform(p.size.0 / art.0, p.size.1 / art.1);
+    let [a, b, c, d, ..] = m.as_coeffs();
+    if b.abs() > 1e-6 || c.abs() > 1e-6 || a <= 0.0 || d <= 0.0 || rec.rect.is_empty() {
+        return None;
+    }
+    let look = Fx { overlay: fxs.overlay, ..Fx::default() };
+    let r = layers::raster(sh, fx, rec, index, Affine::IDENTITY, &look)
+        .and_then(|b| b.node.get("fills").and_then(|f| f.get(0)).and_then(|f| f.get("imageRef")).and_then(Value::as_str).map(str::to_string))?;
+    let rect = Rect::new(f64::from(rec.rect.left), f64::from(rec.rect.top), f64::from(rec.rect.right), f64::from(rec.rect.bottom));
+    Some((r, util::bbox(m.inverse() * Affine::translate((rect.x0, rect.y0)), rect.width(), rect.height())))
+}
+
+/// One painted path of vector artwork as a vector layer placed by `base`.
+fn painted(sh: &mut Shared, s: &super::vector::Painted, recolor: Option<[f64; 3]>, base: Affine) -> Option<Built> {
+    let bb = s.path.bounding_box();
+    if !bb.is_finite() {
+        return None;
+    }
+    let moved = Affine::translate((-bb.x0, -bb.y0)) * s.path.clone();
+    let mut net = VectorNetwork::from_path(&moved);
+    if let Some((_, winding)) = s.fill {
+        for r in &mut net.regions {
+            r.winding = winding;
+        }
+    }
+    let mut b = Built::new(sh, "VECTOR", "Path", base * Affine::translate((bb.x0, bb.y0)), bb.width(), bb.height());
+    b.node.insert("vectorNetworkRef".into(), json!(sh.networks.len()));
+    sh.networks.push(Some(net));
+    let paint = |c: [f64; 4]| {
+        let rgb = recolor.unwrap_or([c[0], c[1], c[2]]);
+        json!({"type": "SOLID", "color": util::rgba(rgb, c[3])})
+    };
+    b.node.insert(
+        "fills".into(),
+        match s.fill {
+            Some((c, _)) => json!([paint(c)]),
+            None => json!([]),
+        },
+    );
+    if let Some(st) = &s.stroke {
+        b.node.insert("strokes".into(), json!([paint(st.color)]));
+        b.node.insert("strokeWeight".into(), json!(st.width));
+        b.node.insert("strokeAlign".into(), json!("CENTER"));
+        b.node.insert("strokeCap".into(), json!(st.cap));
+        b.node.insert("strokeJoin".into(), json!(st.join));
+        if st.dashes.iter().any(|d| *d > 0.0) {
+            b.node.insert("strokeDashes".into(), json!(st.dashes));
+        }
+    }
+    Some(b)
+}
+
+/// The id a placed file's component goes by: the first embedded file with the same bytes, else
+/// its own uuid.
+fn canonical(sh: &mut Shared, fx: &FileCx, link: &Link) -> String {
+    use std::hash::{Hash, Hasher};
+    let Some(bytes) = link.data.as_ref().and_then(|(bi, r)| fx.file.global_blocks.get(*bi)?.data.get(r.clone())) else { return link.uuid.clone() };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    let key = (fx.id, h.finish(), bytes.len());
+    sh.same_file.entry(key).or_insert_with(|| link.uuid.clone()).clone()
 }

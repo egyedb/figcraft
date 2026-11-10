@@ -54,6 +54,9 @@ craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "e11f9d9aebe
 # The macOS app menu whose Quit (⌘Q) asks the app before quitting, like the window's close button
 # (craft-libs; the menu it replaces quits straight through `terminate:` and loses unsaved work).
 craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "e11f9d9aebea5f6b8e74643c1ea1ed172ba5f545" }
+# Shared PDF reading (craft-libs): the Photoshop import reads embedded vector smart objects
+# (Illustrator files saved with PDF content) through its Device interpreter.
+craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "1b34eba41e62138fc2438d2734523b302840b45d", features = ["interpret"] }
 # Where the settings live: the suite's folder rules, portable mode included (craft-libs).
 craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "e11f9d9aebea5f6b8e74643c1ea1ed172ba5f545" }
 
@@ -167,6 +170,10 @@ panic = "abort"
 
 # Keep the complete egui family and native event bridge on reviewed fork commits.
 [patch.crates-io]
+# craft-pdf's vendored Hayro trees: consumers patch the same craft-libs revision (its crates/pdf README).
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "1b34eba41e62138fc2438d2734523b302840b45d" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "1b34eba41e62138fc2438d2734523b302840b45d" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "1b34eba41e62138fc2438d2734523b302840b45d" }
 ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
